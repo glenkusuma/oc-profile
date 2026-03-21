@@ -22,7 +22,12 @@ success() { echo -e "${GREEN}$1${RESET}"; }
 warn() { echo -e "${YELLOW}$1${RESET}"; }
 
 ensure_profiles_dir() {
-  mkdir -p "${PROFILES_DIR}"
+  mkdir -p -m 700 "${PROFILES_DIR}"
+}
+
+# Set restrictive permissions on credential files
+secure_file() {
+  chmod 600 "$1" 2>/dev/null || true
 }
 
 # Validate profile name: alphanumeric, hyphens, underscores
@@ -42,7 +47,16 @@ profile_exists() {
 
 profile_count() {
   ensure_profiles_dir
-  find "${PROFILES_DIR}" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' '
+  # Only count files that match valid profile naming convention
+  local count=0
+  while IFS= read -r f; do
+    local name
+    name="$(basename "$f" .json)"
+    if [[ "${name}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      ((count++))
+    fi
+  done < <(find "${PROFILES_DIR}" -maxdepth 1 -name '*.json' -type f 2>/dev/null)
+  echo "${count}"
 }
 
 # Returns the active profile name, or "" if none/dangling
@@ -50,8 +64,17 @@ active_profile() {
   if [[ -L "${AUTH_FILE}" ]]; then
     local target
     target="$(readlink "${AUTH_FILE}" 2>/dev/null || true)"
-    if [[ -n "${target}" && -f "${target}" ]]; then
-      basename "${target}" .json
+    if [[ -n "${target}" ]]; then
+      # Resolve relative paths against the symlink's directory
+      local resolved
+      if [[ "${target}" = /* ]]; then
+        resolved="${target}"
+      else
+        resolved="$(dirname "${AUTH_FILE}")/${target}"
+      fi
+      if [[ -f "${resolved}" ]]; then
+        basename "${resolved}" .json
+      fi
     fi
   fi
 }
@@ -89,12 +112,18 @@ cmd_make() {
     if [[ -L "${AUTH_FILE}" ]]; then
       local resolved
       resolved="$(readlink "${AUTH_FILE}")"
+      # Resolve relative paths
+      if [[ "${resolved}" != /* ]]; then
+        resolved="$(dirname "${AUTH_FILE}")/${resolved}"
+      fi
       if [[ ! -f "${resolved}" ]]; then
         die "auth.json symlink is dangling (points to '${resolved}'). Run /connect in opencode first."
       fi
       cp "${resolved}" "${PROFILES_DIR}/${name}.json"
+      secure_file "${PROFILES_DIR}/${name}.json"
     elif [[ -f "${AUTH_FILE}" ]]; then
       cp "${AUTH_FILE}" "${PROFILES_DIR}/${name}.json"
+      secure_file "${PROFILES_DIR}/${name}.json"
     else
       die "no auth.json found at ${AUTH_FILE}. Run /connect in opencode first."
     fi
@@ -108,8 +137,9 @@ cmd_make() {
   else
     # Create an empty placeholder profile
     echo '{}' > "${PROFILES_DIR}/${name}.json"
+    secure_file "${PROFILES_DIR}/${name}.json"
     success "created empty profile '${name}'."
-    info "run /connect in opencode, then 'opencode-profile make ${name} --current' or switch to it and /connect."
+    info "switch to it first ('opencode-profile switch ${name}'), then restart opencode and run /connect."
   fi
 }
 
@@ -136,6 +166,7 @@ cmd_switch() {
     # Safety: back it up in case user forgot to save it
     local backup="${AUTH_DIR}/auth.json.backup"
     cp "${AUTH_FILE}" "${backup}"
+    secure_file "${backup}"
     warn "backed up existing auth.json to ${backup}"
     rm "${AUTH_FILE}"
   fi
@@ -213,16 +244,15 @@ cmd_rename() {
     die "profile '${new}' already exists."
   fi
 
+  # Capture active profile BEFORE the move
+  local current
+  current="$(active_profile)"
+
   mv "${PROFILES_DIR}/${old}.json" "${PROFILES_DIR}/${new}.json"
 
   # If the renamed profile was active, update the symlink
-  local current
-  current="$(active_profile)"
-  if [[ "${current}" == "${old}" || -z "${current}" ]]; then
-    # Re-check: symlink might now be dangling after the rename
-    if [[ -L "${AUTH_FILE}" ]]; then
-      ln -sf "${PROFILES_DIR}/${new}.json" "${AUTH_FILE}"
-    fi
+  if [[ "${current}" == "${old}" ]]; then
+    ln -sf "${PROFILES_DIR}/${new}.json" "${AUTH_FILE}"
   fi
 
   success "renamed '${old}' -> '${new}'."
@@ -258,13 +288,18 @@ cmd_help() {
   echo "  delete <name>              Delete a profile (not the last or active one)"
   echo "  help                       Show this help"
   echo ""
-  echo -e "${BOLD}SETUP${RESET}"
-  echo "  1. /connect in opencode with account A"
-  echo "  2. opencode-profile make work --current"
-  echo "  3. /connect in opencode with account B"
-  echo "  4. opencode-profile make personal --current"
-  echo "  5. opencode-profile switch work"
-  echo "  6. restart opencode"
+echo -e "${BOLD}SETUP${RESET}"
+  echo " SAFE WORKFLOW (prevents credential overwrite):"
+  echo " 1. /connect in opencode with account A"
+  echo " 2. opencode-profile make work --current"
+  echo " 3. opencode-profile make personal"
+  echo " 4. opencode-profile switch personal"
+  echo " 5. restart opencode"
+  echo " 6. /connect in opencode with account B"
+  echo " 7. opencode-profile make personal --current"
+  echo ""
+  echo " WARNING: Do NOT run /connect while a profile is active"
+  echo "          without first switching to an empty profile."
   echo ""
   echo -e "${BOLD}FILES${RESET}"
   echo "  ${AUTH_FILE}        (symlink to active profile)"
