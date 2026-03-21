@@ -1,0 +1,17 @@
+# BATS test temporary files
+.bats/
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test-results/
