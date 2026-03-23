@@ -91,11 +91,17 @@ git submodule update --init --recursive
 ./test/run-tests.sh
 ```
 
-Or run specific test files:
+Or run a specific suite file:
 
 ```bash
-./test/bats/bin/bats test/oc_profile.bats
+./test/bats/bin/bats test/oc_profile_switch.bats
 ```
+
+Suite files are split by concern for maintainability:
+`test/oc_profile_core.bats`, `test/oc_profile_switch.bats`,
+`test/oc_profile_migrate_lock.bats`, `test/oc_profile_crud.bats`,
+`test/oc_profile_security.bats`, `test/oc_profile_edge.bats`,
+and `test/oc_profile_multi_provider.bats`.
 
 ### Test Coverage
 
@@ -109,6 +115,50 @@ The test suite covers:
 - Profile renaming (`rename`)
 - Active profile detection (`which`)
 - Known security bugs (tests document expected behavior)
+- Multi-provider `auth.json` blobs (see below)
+
+### Multi-provider auth fixtures
+
+OpenCode's `auth.json` is a `Record<providerId, Oauth | Api | WellKnown>` object (see
+[`packages/opencode/src/auth/index.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/auth/index.ts)).
+`oc-profile` treats the file as an opaque blob (copy / canonical-hash / switch), so the
+tests exercise full realistic files rather than single-provider stubs.
+
+#### Simulated credential convention
+
+Every test credential string is generated as **`oc_test_` + 32-hex SHA-256 suffix** seeded
+by a deterministic label so values are reproducible within a run but obviously non-production:
+
+```bash
+sim_token "label"           # → oc_test_<sha256(label)[0:32]>
+```
+
+The `build_multi_provider_auth_json [seed]` helper in `test/test_helper.bash` builds a
+"kitchen-sink" object containing one entry per structural variant:
+
+| Provider key      | Auth type   | Credential fields            |
+|-------------------|-------------|------------------------------|
+| `openai`          | `oauth`     | `access`, `refresh`, `expires`, `accountId` |
+| `anthropic`       | `oauth`     | `access`, `refresh`, `expires` |
+| `github-copilot`  | `oauth`     | `access`, `refresh`, `expires`, `enterpriseUrl` |
+| `amazon-bedrock`  | `api`       | `key`                        |
+| `gitlab`          | `api`       | `key`                        |
+| `nvidia`          | `api`       | `key`                        |
+| `huggingface`     | `api`       | `key`                        |
+| `openrouter`      | `api`       | `key`                        |
+| `mistral`         | `wellknown` | `key`, `token`               |
+
+Structural ideas were borrowed from OpenCode's own test files (for reference only — this
+repo does **not** run OpenCode's Bun test suite):
+
+- OAuth shape — `packages/opencode/test/provider/gitlab-duo.test.ts`
+- API key (bearer / PAT) — `packages/opencode/test/provider/amazon-bedrock.test.ts`
+- Schema decode — `packages/opencode/test/util/effect-zod.test.ts`
+- Provider IDs — `packages/opencode/src/provider/schema.ts`
+
+A static template (`test/fixtures/auth/kitchen-sink.json.tpl`) documents the sentinel
+names (`__SIM_*__`) that the helper replaces at test-setup time, making the committed file
+structure-only with no real or sensitive-looking strings.
 
 ### CI/CD
 
