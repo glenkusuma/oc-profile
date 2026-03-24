@@ -10,7 +10,7 @@ ACTIVE_CREDENTIALS_FILE="${PROFILES_DIR}/auth.active.json"
 BOOTSTRAP_BACKUP_DIR="${PROFILES_DIR}/.bootstrap-backup"
 STATE_FILE="${AUTH_DIR}/oc-profile.json"
 LOCK_FILE="${AUTH_DIR}/oc-profile.lock"
-TOOL_VERSION="0.1.0"
+TOOL_VERSION="0.1.0-rc.1"
 
 # ── Exit codes ─────────────────────────────────────────────
 # Deterministic exit codes; all mutating paths use these.
@@ -21,6 +21,15 @@ readonly E_PROMPT_NONINT=11 # prompt required but session is non-interactive
 readonly E_HASH_MISMATCH=12 # hash mismatch refused
 readonly E_JQ_MISSING=13   # jq not found or unusable
 readonly E_LOCK_BUSY=14    # lock already held by another process
+readonly E_SKIP_CHECKS_BLOCKED=15  # operation requires strict mode
+readonly E_INIT_REQUIRED=16  # layout requires initialization
+
+# ── Mode flags ──────────────────────────────────────────────
+SKIP_CHECKS=false
+
+if [[ "${OC_PROFILE_SKIP_CHECKS:-}" == "true" ]]; then
+  SKIP_CHECKS=true
+fi
 
 # ── Colors ─────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -38,6 +47,39 @@ die_with_code() { local code="$1"; shift; echo -e "${RED}error:${RESET} $*" >&2;
 info()          { echo -e "${CYAN}$1${RESET}"; }
 success()       { echo -e "${GREEN}$1${RESET}"; }
 warn()          { echo -e "${YELLOW}$1${RESET}"; }
+
+log_v() {
+  [[ "${VERBOSE:-0}" -ge 1 ]] && info "$1"
+  return 0
+}
+
+log_vv() {
+  [[ "${VERBOSE:-0}" -ge 2 ]] && info "$1"
+  return 0
+}
+
+run_mutation() {
+  # $1 = descriptive label, remaining args = command + args
+  local label="$1"
+  shift
+  if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    info "[DRY-RUN] ${label}"
+    return 0
+  fi
+  "$@"
+}
+
+run_mutation_fn() {
+  # $1 = descriptive label, $2 = function name, remaining args = function args
+  local label="$1"
+  local fn="$2"
+  shift 2
+  if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    info "[DRY-RUN] ${label}"
+    return 0
+  fi
+  "${fn}" "$@"
+}
 
 # ── Low-level helpers ──────────────────────────────────────
 
@@ -93,7 +135,30 @@ atomic_copy_json() {
   chmod 600 "${dest}" 2>/dev/null || true
 }
 
+create_empty_profile_file() {
+  local dest="$1"
+  local tmp
+  tmp="$(mktemp -p "$(dirname "${dest}")" .oc-profile.make.XXXXXX)"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  printf '{}\n' > "${tmp}"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  mv -f "${tmp}" "${dest}"
+  chmod 600 "${dest}" 2>/dev/null || true
+}
+
+backup_auth_file() {
+  local src="$1"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local backup_path="${BOOTSTRAP_BACKUP_DIR}/${ts}_pre-init_auth.json"
+  atomic_copy_json "${src}" "${backup_path}"
+}
+
 acquire_lock() {
+  if [[ "${SKIP_CHECKS}" == "true" ]]; then
+    warn "skipping flock check (--skip-checks mode). Mutating operations without locking may cause race conditions."
+    return 0
+  fi
   # Acquires a global flock on LOCK_FILE; exits with E_LOCK_BUSY if already held.
   command -v flock >/dev/null 2>&1 \
     || die_with_code "${E_GENERIC}" "flock not found; cannot safely run mutating commands."
@@ -152,10 +217,18 @@ require_jq() {
   fi
 
   if [[ -z "${jq_bin}" ]]; then
+    if [[ "${SKIP_CHECKS}" == "true" ]]; then
+      warn "skipping jq check (--skip-checks mode): jq not found."
+      return 1
+    fi
     die_with_code "${E_JQ_MISSING}" \
-      "jq is required but not found. Install jq >= 1.6 (https://jqlang.org/) and retry."
+      "jq is required but not found. Install jq >= 1.8 (https://jqlang.org/) and retry."
   fi
   if ! "${jq_bin}" --version >/dev/null 2>&1; then
+    if [[ "${SKIP_CHECKS}" == "true" ]]; then
+      warn "skipping jq check (--skip-checks mode): jq is not usable."
+      return 1
+    fi
     die_with_code "${E_JQ_MISSING}" \
       "jq is not usable. Ensure jq is installed and accessible in PATH."
   fi
@@ -180,9 +253,12 @@ state_is_valid() {
   [[ -f "${STATE_FILE}" ]] || return 1
   local jq_bin
   jq_bin="$(require_jq)"
-  "${jq_bin}" -e \
+  if "${jq_bin}" -e \
     '(.schema_version == 1) and (.cli_version|type=="string") and (.active_profile|type=="string") and (.profiles|type=="object")' \
-    "${STATE_FILE}" >/dev/null 2>&1
+    "${STATE_FILE}" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 state_active_profile() {
@@ -195,7 +271,19 @@ state_has_profile() {
   local name="$1"
   local jq_bin
   jq_bin="$(require_jq)"
-  "${jq_bin}" -e --arg n "${name}" '.profiles[$n] != null' "${STATE_FILE}" >/dev/null 2>&1
+  if "${jq_bin}" -e --arg n "${name}" '.profiles[$n] != null' "${STATE_FILE}" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+state_has_any_profiles() {
+  local jq_bin
+  jq_bin="$(require_jq)"
+  if "${jq_bin}" -e '(.profiles|type=="object") and ((.profiles|length) > 0)' "${STATE_FILE}" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 state_profile_sha() {
@@ -281,30 +369,78 @@ profiles_unknown_files() {
 
 # ── Layout / migration helpers ─────────────────────────────
 
-layout_is_legacy() {
-  # Returns 0 (true) when the on-disk layout requires migration.
-  # Legacy conditions:
-  #   - STATE_FILE missing or invalid schema, OR
-  #   - auth.json does not symlink to profiles/auth.active.json
-  if ! state_is_valid; then
+detect_layout_state() {
+  # Returns one of: initialized, legacy, fresh, broken
+  local state_valid=false
+  local auth_exists=false
+  local auth_is_symlink=false
+  local auth_target=""
+  local active_exists=false
+
+  if state_is_valid; then
+    state_valid=true
+  fi
+
+  if [[ -e "${AUTH_FILE}" || -L "${AUTH_FILE}" ]]; then
+    auth_exists=true
+  fi
+  if [[ -L "${AUTH_FILE}" ]]; then
+    auth_is_symlink=true
+    auth_target="$(resolve_symlink_target "${AUTH_FILE}" || true)"
+  fi
+  if [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+    active_exists=true
+  fi
+
+  # Fully initialized expected layout.
+  if [[ "${state_valid}" == "true" \
+        && "${auth_is_symlink}" == "true" \
+        && "${auth_target}" == "${ACTIVE_CREDENTIALS_FILE}" \
+        && "${active_exists}" == "true" ]]; then
+    echo "initialized"
     return 0
   fi
-  if [[ ! -L "${AUTH_FILE}" ]]; then
+
+  # Known legacy marker: auth.json points directly to a saved profile.
+  if [[ "${auth_is_symlink}" == "true" \
+        && "${auth_target}" == "${PROFILES_DIR}/"*.json \
+        && "${auth_target}" != "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+    echo "legacy"
     return 0
   fi
-  local resolved
-  resolved="$(resolve_symlink_target "${AUTH_FILE}" || true)"
-  [[ -n "${resolved}" ]] || return 0
-  # Return 0 (legacy) only when the symlink does NOT point to ACTIVE_CREDENTIALS_FILE.
-  [[ "${resolved}" != "${ACTIVE_CREDENTIALS_FILE}" ]]
+
+  # Fresh environments: no valid state and no legacy markers.
+  if [[ "${state_valid}" != "true" ]]; then
+    if [[ "${auth_is_symlink}" == "true" ]]; then
+      # auth.json already points to active path but state is missing/invalid.
+      if [[ "${auth_target}" == "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+        echo "fresh"
+        return 0
+      fi
+      # Unknown symlink target is not safe to auto-classify.
+      echo "broken"
+      return 0
+    fi
+    # No auth or plain auth file: first-run initialization path.
+    if [[ "${auth_exists}" == "false" || -f "${AUTH_FILE}" ]]; then
+      echo "fresh"
+      return 0
+    fi
+  fi
+
+  # Any other state should be treated as broken and requires operator action.
+  echo "broken"
 }
 
-require_migrated_layout() {
-  # Call at the start of every mutating command.
-  # Uses an explicit if so set -e is never triggered by the layout check itself.
-  if layout_is_legacy; then
-    die_with_code "${E_LEGACY}" "legacy layout detected; run 'opencode-profile migrate' first."
-  fi
+require_initialized_layout() {
+  local layout_state
+  layout_state="$(detect_layout_state)"
+  case "${layout_state}" in
+    initialized) return 0 ;;
+    legacy) die_with_code "${E_LEGACY}" "legacy layout detected; run 'oc-profile migrate' first." ;;
+    fresh) die_with_code "${E_INIT_REQUIRED}" "fresh environment detected; run 'oc-profile init' first." ;;
+    *) die_with_code "${E_GENERIC}" "layout is inconsistent; fix auth/state files or run 'oc-profile init' on a fresh setup." ;;
+  esac
 }
 
 discover_active_profile() {
@@ -337,12 +473,13 @@ cmd_version() {
 
 cmd_help() {
   echo ""
-  echo -e "${BOLD}opencode-profile${RESET} — manage OpenAI auth profiles for OpenCode"
+  echo -e "${BOLD}oc-profile${RESET} — manage OpenCode auth profiles"
   echo ""
   echo -e "${BOLD}USAGE${RESET}"
-  echo "  opencode-profile <command> [args]"
+  echo "  oc-profile <command> [args]"
   echo ""
   echo -e "${BOLD}COMMANDS${RESET}"
+  echo "  init                             Initialize fresh layout for first-time setup"
   echo "  migrate                          Migrate legacy installs to the current layout"
   echo "  make <name> [--current]          Save current auth as a profile, or create a placeholder"
   echo "  switch <name>                    Switch live auth to a saved profile (restart opencode)"
@@ -353,6 +490,13 @@ cmd_help() {
   echo "  version|--version                Print version"
   echo "  help|--help|-h                   Show this help"
   echo ""
+  echo -e "${BOLD}OPTIONS${RESET}"
+  echo "  --skip-checks                    Skip runtime dependency checks (jq, flock)"
+  echo "  --always-checks                  Force strict mode (default)"
+  echo "  --dry-run                        Show planned actions without executing"
+  echo "  -v, --verbose                    Enable verbose output"
+  echo "  -vv                              Enable extra verbose output"
+  echo ""
   echo -e "${BOLD}EXIT CODES${RESET}"
   echo "  0  success"
   echo "  10 legacy layout detected — run 'migrate'"
@@ -360,15 +504,21 @@ cmd_help() {
   echo "  12 hash mismatch refused"
   echo "  13 jq missing or unusable"
   echo "  14 lock busy"
+  echo "  15 operation requires strict mode (skip-checks not allowed)"
+  echo "  16 fresh layout requires init"
+  echo ""
+  echo -e "${BOLD}ENVIRONMENT${RESET}"
+  echo "  OC_PROFILE_SKIP_CHECKS=true      Enable skip-checks mode (alternative to flag)"
+  echo "  OC_PROFILE_JQ=/path/to/jq        Use specific jq binary"
   echo ""
   echo -e "${BOLD}SETUP${RESET}"
   echo "  1. /connect in opencode with account A"
-  echo "  2. opencode-profile make work --current"
-  echo "  3. opencode-profile make personal"
-  echo "  4. opencode-profile switch personal"
+  echo "  2. oc-profile make work --current"
+  echo "  3. oc-profile make personal"
+  echo "  4. oc-profile switch personal"
   echo "  5. restart opencode"
   echo "  6. /connect in opencode with account B"
-  echo "  7. opencode-profile make personal --current"
+  echo "  7. oc-profile make personal --current"
   echo ""
   echo -e "${BOLD}FILES${RESET}"
   echo "  ${AUTH_FILE}              (symlink -> profiles/auth.active.json)"
@@ -378,12 +528,97 @@ cmd_help() {
   echo ""
 }
 
-cmd_migrate() {
+cmd_init() {
+  local layout_state
+  layout_state="$(detect_layout_state)"
+
+  case "${layout_state}" in
+    initialized)
+      success "already initialized."
+      return 0
+      ;;
+    legacy)
+      die_with_code "${E_LEGACY}" "legacy layout detected; run 'oc-profile migrate' first."
+      ;;
+    broken)
+      die_with_code "${E_GENERIC}" "layout is inconsistent; cannot auto-initialize safely. Back up ${AUTH_DIR} and repair manually."
+      ;;
+    fresh)
+      ;;
+    *)
+      die_with_code "${E_GENERIC}" "unknown layout state '${layout_state}'."
+      ;;
+  esac
+
+  log_v "Acquiring lock..."
   acquire_lock
   ensure_dirs
   require_jq >/dev/null
 
+  # If auth.json is a regular file, preserve it first, then promote as active.
+  if [[ -f "${AUTH_FILE}" && ! -L "${AUTH_FILE}" ]]; then
+    log_v "Backing up existing auth.json before initialization..."
+    run_mutation_fn "backup existing auth file ${AUTH_FILE}" backup_auth_file "${AUTH_FILE}"
+
+    log_v "Promoting existing auth.json to live credentials file..."
+    run_mutation_fn "promote ${AUTH_FILE} -> ${ACTIVE_CREDENTIALS_FILE}" atomic_copy_json "${AUTH_FILE}" "${ACTIVE_CREDENTIALS_FILE}"
+  elif [[ ! -f "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+    # Fresh with no existing credentials: create empty live credentials file.
+    log_v "Creating empty live credentials file..."
+    run_mutation_fn "create empty live credentials file ${ACTIVE_CREDENTIALS_FILE}" create_empty_profile_file "${ACTIVE_CREDENTIALS_FILE}"
+  fi
+
+  log_v "Pointing auth.json to live credentials file..."
+  run_mutation "repoint auth symlink ${AUTH_FILE} -> ${ACTIVE_CREDENTIALS_FILE}" ln -sf "${ACTIVE_CREDENTIALS_FILE}" "${AUTH_FILE}"
+
+  local active_profile=""
+  local jq_bin
+  jq_bin="$(require_jq)"
+  if [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]] && "${jq_bin}" -e 'type=="object" and (keys|length) > 0' "${ACTIVE_CREDENTIALS_FILE}" >/dev/null 2>&1; then
+    local default_profile_path="${PROFILES_DIR}/default.json"
+    log_v "Creating default profile from current live credentials..."
+    run_mutation_fn "copy ${ACTIVE_CREDENTIALS_FILE} -> ${default_profile_path}" atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${default_profile_path}"
+    active_profile="default"
+  fi
+  run_mutation_fn "rebuild state with active profile '${active_profile}'" state_rebuild "${active_profile}"
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    success "[DRY-RUN] init completed with no changes."
+  elif [[ "${active_profile}" == "default" ]]; then
+    success "initialized fresh layout (${TOOL_VERSION}) and created profile 'default' from current auth."
+  else
+    success "initialized fresh layout (${TOOL_VERSION})."
+  fi
+}
+
+cmd_migrate() {
+  local layout_state
+  layout_state="$(detect_layout_state)"
+  case "${layout_state}" in
+    legacy)
+      ;;
+    fresh)
+      die_with_code "${E_INIT_REQUIRED}" "fresh environment detected; run 'oc-profile init' first."
+      ;;
+    initialized)
+      success "already on current layout; migration not required."
+      return 0
+      ;;
+    *)
+      die_with_code "${E_GENERIC}" "layout is inconsistent; cannot migrate safely."
+      ;;
+  esac
+
+  log_v "Acquiring lock..."
+  acquire_lock
+  log_v "Ensuring profile directories exist..."
+  ensure_dirs
+  log_vv "  Auth dir: ${AUTH_DIR}"
+  log_vv "  Profiles dir: ${PROFILES_DIR}"
+  require_jq >/dev/null
+
   # Detect legacy active profile from the old direct symlink, before we change anything.
+  log_v "Detecting legacy active profile..."
   local legacy_active=""
   if [[ -L "${AUTH_FILE}" ]]; then
     local resolved
@@ -395,6 +630,7 @@ cmd_migrate() {
 
   # One-time bootstrap backup — created only if the backup directory is empty.
   if [[ -z "$(ls -1 "${BOOTSTRAP_BACKUP_DIR}" 2>/dev/null | head -n 1 || true)" ]]; then
+    log_v "Preparing bootstrap backup..."
     local source_file=""
     if [[ -L "${AUTH_FILE}" ]]; then
       local resolved
@@ -411,30 +647,34 @@ cmd_migrate() {
     local ts
     ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     local backup_path="${BOOTSTRAP_BACKUP_DIR}/${ts}_pre-migrate_auth.json"
-    atomic_copy_json "${source_file}" "${backup_path}"
+    run_mutation_fn "copy bootstrap backup ${source_file} -> ${backup_path}" atomic_copy_json "${source_file}" "${backup_path}"
 
-    local src_sha backup_sha
-    src_sha="$(canonical_hash_file "${source_file}")"
-    backup_sha="$(canonical_hash_file "${backup_path}")"
-    [[ "${src_sha}" == "${backup_sha}" ]] \
-      || die_with_code "${E_GENERIC}" "bootstrap backup verification failed."
+    if [[ "${DRY_RUN}" != "true" ]]; then
+      local src_sha backup_sha
+      src_sha="$(canonical_hash_file "${source_file}")"
+      backup_sha="$(canonical_hash_file "${backup_path}")"
+      [[ "${src_sha}" == "${backup_sha}" ]] \
+        || die_with_code "${E_GENERIC}" "bootstrap backup verification failed."
+    fi
   fi
 
   # Ensure the live credentials file exists.
   if [[ ! -f "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+    log_v "Ensuring live credentials file exists..."
     if [[ -L "${AUTH_FILE}" ]]; then
       local resolved
       resolved="$(resolve_symlink_target "${AUTH_FILE}" || true)"
       [[ -f "${resolved}" ]] \
         || die_with_code "${E_GENERIC}" "auth.json does not point to a usable file for migration."
-      atomic_copy_json "${resolved}" "${ACTIVE_CREDENTIALS_FILE}"
+      run_mutation_fn "copy active credentials ${resolved} -> ${ACTIVE_CREDENTIALS_FILE}" atomic_copy_json "${resolved}" "${ACTIVE_CREDENTIALS_FILE}"
     else
       die_with_code "${E_GENERIC}" "auth.json must be a symlink for migration."
     fi
   fi
 
   # Repoint auth.json to the live credentials file.
-  ln -sf "${ACTIVE_CREDENTIALS_FILE}" "${AUTH_FILE}"
+  log_v "Updating auth.json symlink to live credentials..."
+  run_mutation "repoint auth symlink ${AUTH_FILE} -> ${ACTIVE_CREDENTIALS_FILE}" ln -sf "${ACTIVE_CREDENTIALS_FILE}" "${AUTH_FILE}"
 
   # Derive active profile name and rebuild state.
   local active_profile="${legacy_active}"
@@ -442,15 +682,15 @@ cmd_migrate() {
     active_profile="$(discover_active_profile)"
   fi
 
-  state_rebuild "${active_profile}"
-  success "migrated to current layout (${TOOL_VERSION}). Restart opencode to apply changes."
+  run_mutation_fn "rebuild state with active profile '${active_profile}'" state_rebuild "${active_profile}"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    success "[DRY-RUN] migrate completed with no changes."
+  else
+    success "migrated to current layout (${TOOL_VERSION}). Restart opencode to apply changes."
+  fi
 }
 
 cmd_make() {
-  require_migrated_layout
-  acquire_lock
-  require_jq >/dev/null
-
   local name=""
   local use_current=false
 
@@ -462,9 +702,15 @@ cmd_make() {
     esac
   done
 
-  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "usage: opencode-profile make <name> [--current]"
+  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "usage: oc-profile make <name> [--current]"
   validate_profile_name "${name}"
+
+  require_initialized_layout
+  log_v "Acquiring lock..."
+  acquire_lock
+  require_jq >/dev/null
   ensure_dirs
+  log_vv "  Target profile path: ${PROFILES_DIR}/${name}.json"
 
   if state_has_profile "${name}"; then
     die_with_code "${E_GENERIC}" "profile '${name}' already exists. Delete it first or choose another name."
@@ -473,30 +719,33 @@ cmd_make() {
   if [[ "${use_current}" == "true" ]]; then
     [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]] \
       || die_with_code "${E_GENERIC}" "live credentials file not found (${ACTIVE_CREDENTIALS_FILE})."
-    atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${PROFILES_DIR}/${name}.json"
-    state_rebuild "${name}"
-    success "created profile '${name}' from current auth and set as active."
+    log_v "Creating profile '${name}' from current auth..."
+    run_mutation_fn "copy ${ACTIVE_CREDENTIALS_FILE} -> ${PROFILES_DIR}/${name}.json" atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${PROFILES_DIR}/${name}.json"
+    run_mutation_fn "rebuild state with active profile '${name}'" state_rebuild "${name}"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+      success "[DRY-RUN] make '${name}' (--current) completed with no changes."
+    else
+      success "created profile '${name}' from current auth and set as active."
+    fi
   else
+    if ! state_has_any_profiles; then
+      die_with_code "${E_GENERIC}" "first profile must be saved from current credentials. Run 'oc-profile make ${name} --current' first."
+    fi
+    log_v "Creating empty profile '${name}'..."
     local dest="${PROFILES_DIR}/${name}.json"
-    local tmp
-    tmp="$(mktemp -p "${PROFILES_DIR}" .oc-profile.make.XXXXXX)"
-    chmod 600 "${tmp}" 2>/dev/null || true
-    printf '{}\n' > "${tmp}"
-    chmod 600 "${tmp}" 2>/dev/null || true
-    mv -f "${tmp}" "${dest}"
-    chmod 600 "${dest}" 2>/dev/null || true
+    run_mutation_fn "create empty profile file ${dest}" create_empty_profile_file "${dest}"
     local current_active
     current_active="$(state_active_profile)"
-    state_rebuild "${current_active}"
-    success "created profile '${name}'."
+    run_mutation_fn "rebuild state with active profile '${current_active}'" state_rebuild "${current_active}"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+      success "[DRY-RUN] make '${name}' completed with no changes."
+    else
+      success "created profile '${name}'."
+    fi
   fi
 }
 
 cmd_switch() {
-  require_migrated_layout
-  acquire_lock
-  require_jq >/dev/null
-
   local name=""
   local save_current=""
   local trust_mismatch=""
@@ -513,12 +762,17 @@ cmd_switch() {
   done
 
   [[ -n "${name}" ]] \
-    || die_with_code "${E_GENERIC}" "usage: opencode-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch]"
+    || die_with_code "${E_GENERIC}" "usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch]"
   validate_profile_name "${name}"
+
+  require_initialized_layout
+  log_v "Acquiring lock..."
+  acquire_lock
+  require_jq >/dev/null
   ensure_dirs
 
   state_has_profile "${name}" \
-    || die_with_code "${E_GENERIC}" "profile '${name}' does not exist. Run 'opencode-profile list' to see available profiles."
+    || die_with_code "${E_GENERIC}" "profile '${name}' does not exist. Run 'oc-profile list' to see available profiles."
 
   # Capture target profile hash from state before any potential rebuild.
   local recorded_sha
@@ -527,9 +781,14 @@ cmd_switch() {
   local current
   current="$(state_active_profile)"
   if [[ "${current}" == "${name}" ]]; then
+    log_v "Already on profile '${name}'."
     info "already on profile '${name}'."
     return 0
   fi
+
+  log_v "Switching to profile '${name}'..."
+  log_vv "  Source profile: ${PROFILES_DIR}/${name}.json"
+  log_vv "  Target live file: ${ACTIVE_CREDENTIALS_FILE}"
 
   local interactive
   is_interactive && interactive="yes" || interactive="no"
@@ -559,8 +818,8 @@ cmd_switch() {
     if [[ "${save_current}" == "yes" ]]; then
       [[ -n "${current}" ]] \
         || die_with_code "${E_GENERIC}" "cannot save dirty credentials: no active profile name in state."
-      atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${PROFILES_DIR}/${current}.json"
-      state_rebuild "${current}"
+      run_mutation_fn "save dirty active credentials ${ACTIVE_CREDENTIALS_FILE} -> ${PROFILES_DIR}/${current}.json" atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${PROFILES_DIR}/${current}.json"
+      run_mutation_fn "rebuild state with active profile '${current}'" state_rebuild "${current}"
     fi
   fi
 
@@ -581,17 +840,21 @@ cmd_switch() {
       [[ "${trust_mismatch}" == "yes" ]] \
         || die_with_code "${E_HASH_MISMATCH}" "hash mismatch refused."
     fi
-    state_rebuild "${current}"
+    run_mutation_fn "rebuild state after trusting hash mismatch (active '${current}')" state_rebuild "${current}"
   fi
 
   # ── Apply switch ─────────────────────────────────────────
-  atomic_copy_json "${PROFILES_DIR}/${name}.json" "${ACTIVE_CREDENTIALS_FILE}"
-  state_rebuild "${name}"
+  run_mutation_fn "copy target profile ${PROFILES_DIR}/${name}.json -> ${ACTIVE_CREDENTIALS_FILE}" atomic_copy_json "${PROFILES_DIR}/${name}.json" "${ACTIVE_CREDENTIALS_FILE}"
+  run_mutation_fn "rebuild state with active profile '${name}'" state_rebuild "${name}"
 
-  if pgrep -x opencode >/dev/null 2>&1; then
+  if [[ "${DRY_RUN}" != "true" ]] && pgrep -x opencode >/dev/null 2>&1; then
     warn "warning: opencode appears to be running. Restart it to apply the switch."
   fi
-  success "switched to '${name}'. Restart opencode to apply."
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    success "[DRY-RUN] switch to '${name}' completed with no changes."
+  else
+    success "switched to '${name}'. Restart opencode to apply."
+  fi
 }
 
 cmd_list() {
@@ -603,12 +866,15 @@ cmd_list() {
 
     if [[ ${#profiles[@]} -eq 0 ]]; then
       info "no profiles saved yet."
+      if [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+        info "run 'oc-profile make <name> --current' to save current live credentials as your first profile."
+      fi
       echo ""
       return 0
     fi
 
     echo ""
-    echo -e "${BOLD}OpenAI profiles:${RESET}"
+    echo -e "${BOLD}Saved profiles:${RESET}"
     echo ""
     for p in "${profiles[@]}"; do
       if [[ "${p}" == "${current}" ]]; then
@@ -622,25 +888,29 @@ cmd_list() {
   fi
 
   info "no profiles saved yet."
+  if [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]]; then
+    info "run 'oc-profile make <name> --current' to save current live credentials as your first profile."
+  fi
   echo ""
 }
 
 cmd_which() {
-  state_is_valid || die_with_code "${E_GENERIC}" "no active profile found."
+  state_is_valid || die_with_code "${E_GENERIC}" "no active profile found. Run 'oc-profile make <name> --current' to save current live credentials first."
   local current
   current="$(state_active_profile)"
-  [[ -n "${current}" ]] || die_with_code "${E_GENERIC}" "no active profile found."
+  [[ -n "${current}" ]] || die_with_code "${E_GENERIC}" "no active profile found. Run 'oc-profile make <name> --current' to save current live credentials first."
   echo "${current}"
 }
 
 cmd_delete() {
-  require_migrated_layout
+  local name="${1:-}"
+  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "usage: oc-profile delete <name>"
+  validate_profile_name "${name}"
+
+  require_initialized_layout
+  log_v "Acquiring lock..."
   acquire_lock
   require_jq >/dev/null
-
-  local name="${1:-}"
-  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "usage: opencode-profile delete <name>"
-  validate_profile_name "${name}"
   ensure_dirs
 
   state_has_profile "${name}" \
@@ -660,21 +930,26 @@ cmd_delete() {
   [[ -z "${unknowns}" ]] \
     || die_with_code "${E_GENERIC}" "unrecognized JSON file(s) in profiles directory:\n${unknowns}"
 
-  rm -f "${PROFILES_DIR}/${name}.json"
-  state_rebuild "${current}"
-  success "deleted profile '${name}'."
+  run_mutation "remove profile file ${PROFILES_DIR}/${name}.json" rm -f "${PROFILES_DIR}/${name}.json"
+  run_mutation_fn "rebuild state with active profile '${current}'" state_rebuild "${current}"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    success "[DRY-RUN] delete '${name}' completed with no changes."
+  else
+    success "deleted profile '${name}'."
+  fi
 }
 
 cmd_rename() {
-  require_migrated_layout
-  acquire_lock
-  require_jq >/dev/null
-
   local old="${1:-}"
   local new="${2:-}"
-  [[ -n "${old}" && -n "${new}" ]] || die_with_code "${E_GENERIC}" "usage: opencode-profile rename <old> <new>"
+  [[ -n "${old}" && -n "${new}" ]] || die_with_code "${E_GENERIC}" "usage: oc-profile rename <old> <new>"
   validate_profile_name "${old}"
   validate_profile_name "${new}"
+
+  require_initialized_layout
+  log_v "Acquiring lock..."
+  acquire_lock
+  require_jq >/dev/null
 
   state_has_profile "${old}" \
     || die_with_code "${E_GENERIC}" "profile '${old}' does not exist."
@@ -684,18 +959,94 @@ cmd_rename() {
   local current
   current="$(state_active_profile)"
 
-  mv "${PROFILES_DIR}/${old}.json" "${PROFILES_DIR}/${new}.json"
+  run_mutation "rename profile file ${PROFILES_DIR}/${old}.json -> ${PROFILES_DIR}/${new}.json" mv "${PROFILES_DIR}/${old}.json" "${PROFILES_DIR}/${new}.json"
   [[ "${current}" == "${old}" ]] && current="${new}"
-  state_rebuild "${current}"
-  success "renamed '${old}' -> '${new}'."
+  run_mutation_fn "rebuild state with active profile '${current}'" state_rebuild "${current}"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    success "[DRY-RUN] rename '${old}' -> '${new}' completed with no changes."
+  else
+    success "renamed '${old}' -> '${new}'."
+  fi
 }
 
 # ── Main dispatch ──────────────────────────────────────────
 
-cmd="${1:-help}"
-shift || true
+DRY_RUN=false
+VERBOSE=0
+
+# Extract command first (first non-flag argument)
+# Then parse remaining arguments as global flags
+# This allows: ./oc-profile make work --dry-run
+cmd=""
+# Parse arguments: extract command and global flags
+# Global flags can appear before OR after the command
+remaining_args=()
+cmd=""
+
+for arg in "$@"; do
+  # Check if this is a global flag
+  case "${arg}" in
+    --skip-checks) SKIP_CHECKS=true ;;
+    --always-checks) SKIP_CHECKS=false ;;
+    --dry-run) DRY_RUN=true ;;
+    -v|--verbose) VERBOSE=$((VERBOSE + 1)) ;;
+    -vv) VERBOSE=2 ;;
+    -vvv) VERBOSE=3 ;;
+    -v*)
+      # Handle grouped verbose flags like -vvv and -vvvv.
+      if [[ "${arg}" =~ ^-v+$ ]]; then
+        VERBOSE=$((VERBOSE + ${#arg} - 1))
+      else
+        remaining_args+=("${arg}")
+      fi
+      ;;
+    --help|-h) cmd_help; exit 0 ;;
+    --version) cmd_version; exit 0 ;;
+    --*)
+      # Check if it's a known command-specific flag
+      case "${arg}" in
+        --current|--save-current|--no-save-current|--trust-mismatch|--abort-on-mismatch)
+          # Command-specific flag - pass to command
+          remaining_args+=("${arg}")
+          ;;
+        *)
+          # Unknown long flag - error
+          echo -e "${RED}error:${RESET} unknown flag '${arg}'" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    -*)
+      # Unknown short flag - pass to command (let command handle error)
+      remaining_args+=("${arg}")
+      ;;
+    *)
+      # Non-flag argument
+      if [[ -z "${cmd}" ]]; then
+        # First non-flag is the command
+        cmd="${arg}"
+      else
+        # Additional non-flag args go to command
+        remaining_args+=("${arg}")
+      fi
+      ;;
+  esac
+done
+
+# If no command found, default to help
+if [[ -z "${cmd}" ]]; then
+  cmd="help"
+fi
+
+# Set $@ to remaining args for command
+set -- "${remaining_args[@]}"
+
+if [[ "${SKIP_CHECKS}" == "true" ]]; then
+  warn "WARNING: --skip-checks is active. Runtime dependency checks (jq, flock) are bypassed."
+fi
 
 case "${cmd}" in
+  init)              cmd_init "$@" ;;
   migrate)           cmd_migrate "$@" ;;
   make)              cmd_make "$@" ;;
   switch)            cmd_switch "$@" ;;
@@ -705,5 +1056,5 @@ case "${cmd}" in
   rename|mv)         cmd_rename "$@" ;;
   version|--version) cmd_version ;;
   help|--help|-h)    cmd_help ;;
-  *) die "unknown command '${cmd}'. Run 'opencode-profile help' for usage." ;;
+  *) die "unknown command '${cmd}'. Run 'oc-profile help' for usage." ;;
 esac

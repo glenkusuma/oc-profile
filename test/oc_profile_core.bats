@@ -28,7 +28,7 @@ teardown() {
 @test "version flag prints version" {
   run "$OC_PROFILE" --version
   assert_success
-  assert_output "0.1.0"
+  assert_output "0.1.0-rc.1"
 }
 
 @test "invalid command shows error" {
@@ -55,6 +55,52 @@ teardown() {
 }
 
 # ──────────────────────────────────────────────────────────────
+# init
+# ──────────────────────────────────────────────────────────────
+
+@test "init creates initialized layout on fresh environment" {
+  setup_fresh_layout
+
+  run "$OC_PROFILE" init
+  assert_success
+  assert_output --partial "initialized fresh layout"
+
+  assert_file_exist "${STATE_FILE}"
+  assert_file_exist "${ACTIVE_CREDENTIALS_FILE}"
+  assert [ -L "${AUTH_FILE}" ]
+  readlink "${AUTH_FILE}" | grep -q "profiles/auth.active.json"
+}
+
+@test "init backs up existing regular auth.json and promotes it to active" {
+  setup_fresh_layout_with_auth_file
+  local before
+  before="$(cat "${AUTH_FILE}")"
+
+  run "$OC_PROFILE" init
+  assert_success
+  assert_output --partial "initialized fresh layout"
+
+  assert [ -L "${AUTH_FILE}" ]
+  local after
+  after="$(cat "${ACTIVE_CREDENTIALS_FILE}")"
+  assert [ "${before}" = "${after}" ]
+  assert_file_exist "${PROFILES_DIR}/default.json"
+
+  run "$OC_PROFILE" which
+  assert_success
+  assert_output "default"
+
+  run ls "${PROFILES_DIR}/.bootstrap-backup/"*_pre-init_auth.json
+  assert_success
+}
+
+@test "init is idempotent on initialized layout" {
+  run "$OC_PROFILE" init
+  assert_success
+  assert_output --partial "already initialized"
+}
+
+# ──────────────────────────────────────────────────────────────
 # make
 # ──────────────────────────────────────────────────────────────
 
@@ -66,14 +112,11 @@ teardown() {
   assert [ -L "${AUTH_FILE}" ]
 }
 
-@test "make creates empty placeholder without changing active when no active profile exists yet" {
+@test "make placeholder is blocked before first saved profile exists" {
   run "$OC_PROFILE" make work
-  assert_success
-  assert_file_exist "${PROFILES_DIR}/work.json"
-  # In this stage, placeholder doesn't force active_profile unless --current is used.
-  run "$OC_PROFILE" which
   assert_failure
-  assert_output --partial "no active profile found"
+  assert_output --partial "first profile must be saved from current credentials"
+  assert_file_not_exist "${PROFILES_DIR}/work.json"
 }
 
 @test "make rejects invalid profile name" {
@@ -100,11 +143,11 @@ teardown() {
   assert_output --partial "usage:"
 }
 
-@test "make --current fails when no live credentials file exists" {
+@test "make --current fails when live credentials file is missing from initialized layout" {
   rm -f "${ACTIVE_CREDENTIALS_FILE}"
   run "$OC_PROFILE" make work --current
   assert_failure
-  assert_output --partial "live credentials file not found"
+  assert_output --partial "layout is inconsistent"
 }
 
 # ──────────────────────────────────────────────────────────────

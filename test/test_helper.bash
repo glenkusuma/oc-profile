@@ -40,7 +40,7 @@ setup_test_env() {
   cat > "${STATE_FILE}" <<'EOF'
 {
   "schema_version": 1,
-  "cli_version": "0.1.0",
+  "cli_version": "0.1.0-rc.1",
   "active_profile": "",
   "profiles": {}
 }
@@ -87,6 +87,20 @@ setup_legacy_layout() {
 
   # Use an absolute symlink to match the "common legacy" case.
   ln -sf "${PROFILES_DIR}/${legacy_active}.json" "${AUTH_FILE}"
+}
+
+setup_fresh_layout() {
+  # Fresh environment: no valid state file and no legacy symlink marker.
+  rm -f "${STATE_FILE}" 2>/dev/null || true
+  rm -f "${AUTH_FILE}" 2>/dev/null || true
+  rm -f "${ACTIVE_CREDENTIALS_FILE}" 2>/dev/null || true
+}
+
+setup_fresh_layout_with_auth_file() {
+  # Fresh environment with existing regular auth.json file.
+  setup_fresh_layout
+  fixture_auth_openai_oauth_1arg "fresh-auth-token" > "${AUTH_FILE}"
+  chmod 600 "${AUTH_FILE}" 2>/dev/null || true
 }
 
 create_lock_holder() {

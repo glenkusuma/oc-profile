@@ -28,6 +28,26 @@ teardown() {
   assert_output --partial "legacy layout detected"
 }
 
+@test "mutating commands refuse fresh layout with exit code 16" {
+  setup_fresh_layout
+
+  run "$OC_PROFILE" make work --current
+  assert_failure
+  assert [ "$status" -eq 16 ]
+  assert_output --partial "fresh environment detected"
+  assert_output --partial "run 'oc-profile init'"
+}
+
+@test "migrate refuses fresh layout and points to init" {
+  setup_fresh_layout
+
+  run "$OC_PROFILE" migrate
+  assert_failure
+  assert [ "$status" -eq 16 ]
+  assert_output --partial "fresh environment detected"
+  assert_output --partial "run 'oc-profile init'"
+}
+
 @test "migrate creates oc-profile.json and repoints auth.json to profiles/auth.active.json" {
   setup_legacy_layout "work"
 
@@ -39,6 +59,20 @@ teardown() {
   assert [ -L "${AUTH_FILE}" ]
   # auth.json should now point to the active file.
   readlink "${AUTH_FILE}" | grep -q "profiles/auth.active.json"
+}
+
+@test "first placeholder attempt is blocked and does not alter live credentials" {
+  local before
+  before="$(sha256sum "${ACTIVE_CREDENTIALS_FILE}" | awk '{print $1}')"
+
+  run "$OC_PROFILE" make work
+  assert_failure
+  assert_output --partial "first profile must be saved from current credentials"
+  assert_file_not_exist "${PROFILES_DIR}/work.json"
+
+  local after
+  after="$(sha256sum "${ACTIVE_CREDENTIALS_FILE}" | awk '{print $1}')"
+  assert [ "${before}" = "${after}" ]
 }
 
 @test "lock contention returns exit code 14" {
