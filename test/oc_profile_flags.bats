@@ -14,6 +14,23 @@ teardown() {
   teardown_test_env
 }
 
+make_fake_jq_proxy() {
+  local version="$1"
+  local real_jq
+  real_jq="$(command -v jq)"
+  local path="${BATS_TEST_TMPDIR}/fake-jq-${version}"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'if [[ "${1:-}" == "--version" ]]; then'
+    printf '  echo "jq-%s"\n' "${version}"
+    printf '%s\n' '  exit 0'
+    printf '%s\n' 'fi'
+    printf 'exec "%s" "$@"\n' "${real_jq}"
+  } > "${path}"
+  chmod +x "${path}"
+  echo "${path}"
+}
+
 # ──────────────────────────────────────────────────────────────
 # --skip-checks flag
 # ──────────────────────────────────────────────────────────────
@@ -47,6 +64,37 @@ teardown() {
 
 @test "--skip-checks after command works" {
   run "$OC_PROFILE" list --skip-checks
+  assert_success
+  assert_output --partial "WARNING: --skip-checks is active"
+}
+
+@test "strict mode enforces jq >= 1.8 with exit code 13" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "jq >= 1.8 is required"
+  assert_output --partial "Install"
+}
+
+@test "strict mode accepts jq 1.8" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.8")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_success
+}
+
+@test "--skip-checks bypasses jq version floor" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" --skip-checks make work --current
   assert_success
   assert_output --partial "WARNING: --skip-checks is active"
 }

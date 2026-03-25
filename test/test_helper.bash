@@ -17,7 +17,7 @@ fixture_auth_openai_oauth_1arg() {
   fixture_auth_openai_oauth "$1" "refresh-$1"
 }
 
-# Create isolated test environment (v0.1.0 layout)
+# Create isolated test environment (current layout)
 setup_test_env() {
   export HOME="${BATS_TEST_TMPDIR}"
   export AUTH_DIR="${HOME}/.local/share/opencode"
@@ -74,7 +74,7 @@ simulate_connect() {
 }
 
 setup_legacy_layout() {
-  # v0.1.0 legacy layout simulation:
+  # Legacy layout simulation:
   # - oc-profile.json missing
   # - auth.json symlink points directly to profiles/<name>.json
   local legacy_active="${1:-work}"

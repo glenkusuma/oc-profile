@@ -216,22 +216,46 @@ require_jq() {
     jq_bin="$(command -v jq || true)"
   fi
 
-  if [[ -z "${jq_bin}" ]]; then
-    if [[ "${SKIP_CHECKS}" == "true" ]]; then
+  if [[ "${SKIP_CHECKS}" == "true" ]]; then
+    if [[ -z "${jq_bin}" ]]; then
       warn "skipping jq check (--skip-checks mode): jq not found."
-      return 1
+      echo "jq"
+      return 0
     fi
-    die_with_code "${E_JQ_MISSING}" \
-      "jq is required but not found. Install jq >= 1.8 (https://jqlang.org/) and retry."
-  fi
-  if ! "${jq_bin}" --version >/dev/null 2>&1; then
-    if [[ "${SKIP_CHECKS}" == "true" ]]; then
+    if ! "${jq_bin}" --version >/dev/null 2>&1; then
       warn "skipping jq check (--skip-checks mode): jq is not usable."
-      return 1
+      echo "${jq_bin}"
+      return 0
     fi
-    die_with_code "${E_JQ_MISSING}" \
-      "jq is not usable. Ensure jq is installed and accessible in PATH."
+    echo "${jq_bin}"
+    return 0
   fi
+
+  if [[ -z "${jq_bin}" ]]; then
+    die_with_code "${E_JQ_MISSING}" \
+      "jq >= 1.8 is required but jq was not found. Install jq (Debian/Ubuntu: apt-get install jq, Arch: pacman -S jq, macOS: brew install jq) and retry."
+  fi
+  local jq_version
+  jq_version="$("${jq_bin}" --version 2>/dev/null || true)"
+  if [[ -z "${jq_version}" ]]; then
+    die_with_code "${E_JQ_MISSING}" \
+      "jq >= 1.8 is required but '${jq_bin}' is not usable. Install jq >= 1.8 and retry."
+  fi
+
+  local major minor
+  if [[ "${jq_version}" =~ ^jq-([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+  else
+    die_with_code "${E_JQ_MISSING}" \
+      "jq >= 1.8 is required but version output was unrecognized ('${jq_version}'). Install jq >= 1.8 and retry."
+  fi
+
+  if (( major < 1 || (major == 1 && minor < 8) )); then
+    die_with_code "${E_JQ_MISSING}" \
+      "jq >= 1.8 is required (found ${jq_version}). Install newer jq (Debian/Ubuntu: apt-get install jq, Arch: pacman -S jq, macOS: brew install jq) and retry."
+  fi
+
   echo "${jq_bin}"
 }
 
@@ -240,6 +264,7 @@ canonical_hash_file() {
   local file="$1"
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   [[ -f "${file}" ]] || die_with_code "${E_GENERIC}" "canonical_hash_file: file not found: ${file}"
   local canon
   canon="$("${jq_bin}" -S -c '.' "${file}")"
@@ -253,6 +278,7 @@ state_is_valid() {
   [[ -f "${STATE_FILE}" ]] || return 1
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   if "${jq_bin}" -e \
     '(.schema_version == 1) and (.cli_version|type=="string") and (.active_profile|type=="string") and (.profiles|type=="object")' \
     "${STATE_FILE}" >/dev/null 2>&1; then
@@ -264,6 +290,7 @@ state_is_valid() {
 state_active_profile() {
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   "${jq_bin}" -r '.active_profile // ""' "${STATE_FILE}" 2>/dev/null || true
 }
 
@@ -271,6 +298,7 @@ state_has_profile() {
   local name="$1"
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   if "${jq_bin}" -e --arg n "${name}" '.profiles[$n] != null' "${STATE_FILE}" >/dev/null 2>&1; then
     return 0
   fi
@@ -280,6 +308,7 @@ state_has_profile() {
 state_has_any_profiles() {
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   if "${jq_bin}" -e '(.profiles|type=="object") and ((.profiles|length) > 0)' "${STATE_FILE}" >/dev/null 2>&1; then
     return 0
   fi
@@ -290,12 +319,14 @@ state_profile_sha() {
   local name="$1"
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   "${jq_bin}" -r --arg n "${name}" '.profiles[$n].sha256 // empty' "${STATE_FILE}" 2>/dev/null || true
 }
 
 state_list_profiles() {
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   "${jq_bin}" -r '.profiles | keys[]' "${STATE_FILE}" 2>/dev/null | sort -u
 }
 
@@ -305,6 +336,9 @@ state_rebuild() {
   local active_profile="$1"
   local updated_at
   updated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local jq_bin
+  jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
 
   local profiles_json="{"
   local first=1
@@ -574,6 +608,7 @@ cmd_init() {
   local active_profile=""
   local jq_bin
   jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
   if [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]] && "${jq_bin}" -e 'type=="object" and (keys|length) > 0' "${ACTIVE_CREDENTIALS_FILE}" >/dev/null 2>&1; then
     local default_profile_path="${PROFILES_DIR}/default.json"
     log_v "Creating default profile from current live credentials..."

@@ -1,8 +1,8 @@
 # oc-profile
 
-Switch between multiple OpenAI subscription accounts (ChatGPT Plus/Pro) in [OpenCode](https://opencode.ai).
+Switch between multiple auth profiles in [OpenCode](https://opencode.ai).
 
-OpenCode stores a single set of OAuth credentials per provider. This script lets you save multiple OpenAI auth profiles and swap between them via symlink.
+OpenCode stores a single active auth blob per installation. This script lets you save multiple auth profiles and switch between them safely.
 
 ## Install
 
@@ -13,15 +13,44 @@ cp oc-profile /usr/local/bin/
 
 Or just run it directly from wherever you cloned it.
 
+### Runtime dependencies
+
+`oc-profile` requires these runtime tools:
+
+- `jq >= 1.8` for canonical JSON integrity checks and state processing
+- `flock` for safe locking on mutating commands
+
+Install examples:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get update && sudo apt-get install -y jq util-linux
+
+# Arch Linux
+sudo pacman -S --needed jq util-linux
+
+# macOS (Homebrew)
+brew install jq util-linux
+```
+
+Failure behavior:
+
+- In strict mode (default), if `jq` is missing/unusable/older than `1.8`, commands that require it fail with deterministic exit code `13` and install guidance.
+- If `flock` is unavailable, mutating commands (`init`, `make`, `switch`, `rename`, `delete`, `migrate`) fail fast because safe lock acquisition is not possible.
+- `--skip-checks` bypasses dependency preflight checks (including the jq version floor). Use it only when you accept reduced safety guarantees.
+
 ## Setup
 
 ```bash
-# 1. Open opencode → /connect → OpenAI → ChatGPT Plus/Pro → sign in with account A
-# 2. Save it as a profile
+# 1. First run only: initialize the fresh layout
+oc-profile init
+
+# 2. Open opencode and run /connect with account A
+# 3. Save it as a profile
 oc-profile make work --current
 
-# 3. Open opencode → /connect → OpenAI → ChatGPT Plus/Pro → sign in with account B
-# 4. Save it as a profile
+# 4. Open opencode and run /connect with account B
+# 5. Save it as a profile
 oc-profile make personal --current
 ```
 
@@ -32,41 +61,134 @@ oc-profile switch work
 # restart opencode
 ```
 
+If commands report a legacy layout requirement, run:
+
+```bash
+oc-profile migrate
+```
+
+If commands report a fresh environment requirement (first run), run:
+
+```bash
+oc-profile init
+```
+
+### Initialization vs migration
+
+`oc-profile` uses explicit layout states:
+
+- **Fresh layout**: first-run environment -> run `oc-profile init`
+- **Legacy layout**: old on-disk format -> run `oc-profile migrate`
+- **Initialized layout**: expected modern tree -> normal commands work
+
 ## Commands
 
 | Command | Description |
 |---|---|
+| `init` | Initialize a fresh environment into the v0.1.0 stateful layout (creates `default` when existing auth is present) |
 | `make <name> --current` | Save current auth as a named profile and set it active |
-| `make <name>` | Create an empty placeholder profile |
+| `make <name>` | Create an empty placeholder profile (allowed only after a first saved profile exists) |
+| `migrate` | Migrate legacy layout to the v0.1.0 stateful layout |
 | `switch <name>` | Switch to a profile (requires restart) |
 | `list` | List all profiles |
 | `which` | Print the active profile name |
 | `rename <old> <new>` | Rename a profile |
 | `delete <name>` | Delete a profile |
+| `version` / `--version` | Print CLI version |
 | `help` | Show help |
 
 Aliases: `ls` for `list`, `rm` for `delete`, `mv` for `rename`.
 
+## Options
+
+| Option | Description |
+|---|---|
+| `--skip-checks` | Skip runtime dependency checks (jq, flock). Use only when you intentionally accept reduced safety checks. |
+| `--always-checks` | Force strict mode (default). |
+| `--dry-run` | Show planned actions without executing. |
+| `-v`, `--verbose` | Enable verbose output. |
+| `-vv` | Enable extra verbose output. |
+
+Environment variables:
+- `OC_PROFILE_SKIP_CHECKS=true` — Enable skip-checks mode (alternative to flag)
+- `OC_PROFILE_JQ=/path/to/jq` — Use specific jq binary
+
+### Dry-Run Mode
+
+Use `--dry-run` with any mutating command to preview actions without executing:
+
+```bash
+oc-profile switch work --dry-run
+oc-profile make personal --current --dry-run
+oc-profile delete old-profile --dry-run
+```
+
+Dry-run executes the same validation and decision path as a real run (including lock acquisition), but suppresses filesystem/state mutations. Use `-v` or `-vv` for more detail.
+
+### First profile safety
+
+To prevent accidental credential loss on first setup:
+
+- `init` promotes existing `auth.json` to `profiles/auth.active.json` and creates `profiles/default.json` when credentials are non-empty.
+- The first saved profile must be created from live credentials with `make <name> --current`.
+- Placeholder creation (`make <name>`) is blocked until at least one saved profile exists.
+
+### Verbose Output
+
+- `-v` / `--verbose`: Show command progress and key steps
+- `-vv`: Show detailed context (file paths, lock info, dependency checks)
+
+Examples:
+```bash
+# Normal switch
+oc-profile switch work
+
+# Verbose switch
+oc-profile switch work -v
+
+# Extra verbose switch
+oc-profile switch work -vv
+
+# Verbose dry-run
+oc-profile switch work -vv --dry-run
+```
+
 ## How it works
 
-Profiles are stored as JSON files in `~/.local/share/opencode/profiles/`. The script turns `~/.local/share/opencode/auth.json` into a symlink pointing to the active profile. Switching just repoints the symlink. All non-OpenAI credentials (Anthropic, Copilot, etc.) are unaffected.
+`oc-profile` keeps OpenCode reading from a stable live credentials file while tracking saved profile integrity in a separate state file.
 
 ```
 ~/.local/share/opencode/
-├── auth.json -> profiles/work.json   # symlink
+├── auth.json -> profiles/auth.active.json
+├── oc-profile.json
 └── profiles/
+    ├── auth.active.json
     ├── work.json
     └── personal.json
 ```
 
-Since OpenCode reads auth at startup, you need to restart it after switching.
+Behavior summary:
+
+- `auth.json` stays a symlink to `profiles/auth.active.json` (the live file OpenCode uses).
+- Saved profiles live in `profiles/<name>.json`.
+- `oc-profile.json` records active profile plus canonical SHA-256 hashes for integrity checks.
+- `switch` copies the selected saved profile into `auth.active.json` atomically, then updates state.
+
+If your environment is on the legacy layout, run `oc-profile migrate` first.
+
+If your environment is fresh (first run, no known profiles), run `oc-profile init` first.
+
+Since OpenCode reads auth at startup, restart OpenCode after switching.
 
 ## Safety
 
 - Cannot delete the last remaining profile
 - Cannot delete the currently active profile
-- Backs up `auth.json` automatically on first switch if it's a regular file
-- Warns if OpenCode is running when you switch
+- Uses lock-based coordination for mutating operations
+- Uses canonical hash checks and explicit trust flow on profile mismatch
+- Fails fast in non-interactive sessions when a prompt would be required
+- Creates a one-time bootstrap backup during migration
+- Warns if OpenCode is running when you switch (restart required to apply)
 - Validates profile names (alphanumeric, hyphens, underscores)
 
 ## Note on token expiry

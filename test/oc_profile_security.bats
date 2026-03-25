@@ -15,7 +15,7 @@ teardown() {
 }
 
 # ──────────────────────────────────────────────────────────────
-# Security bug regressions for v0.1.0
+# Security bug regressions for current layout behavior
 # ──────────────────────────────────────────────────────────────
 
 @test "writing to live credentials does not overwrite saved profile" {
