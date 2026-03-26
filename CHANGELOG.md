@@ -27,7 +27,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Switching now updates live credentials by atomically copying into `profiles/auth.active.json` and refreshing state metadata.
 - Integrity checks compare canonical JSON hashes and require explicit trust when recorded and current target hashes differ.
 - Non-interactive switch behavior now fails fast when operator prompts would otherwise be required.
-- Test naming and section comments were cleaned to remove session-artifact wording.
+- Test naming and section comments were cleaned for consistency.
 - Install/setup documentation now explicitly declares runtime dependencies (`jq >= 1.8`, `flock`) and dependency-related failure behavior.
 - Renamed `--unsafe` mode to `--skip-checks` for clearer semantics.
 - Refactored `--dry-run` to use inline execution-path gating so runtime validations and lock flow match real execution while mutating operations are suppressed.
@@ -36,6 +36,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - First placeholder profile creation is now blocked until an operator saves one real profile with `make <name> --current`.
 - Mutating commands now require initialized layout and return deterministic `init required` guidance on fresh environments.
 - Strict-mode dependency enforcement now requires `jq >= 1.8` with explicit install guidance.
+- Added command-scoped help routing: `help <command>` and `<command> --help|-h` now print subcommand usage and behavior notes.
+- Unknown help topics now return a deterministic non-zero error with guidance to run `oc-profile help`.
 
 ### Security
 - Preserved target-profile tamper detection ordering during dirty-active save flows by capturing target recorded hash before state rebuild.

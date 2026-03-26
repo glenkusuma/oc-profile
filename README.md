@@ -95,9 +95,19 @@ oc-profile init
 | `rename <old> <new>` | Rename a profile |
 | `delete <name>` | Delete a profile |
 | `version` / `--version` | Print CLI version |
-| `help` | Show help |
+| `help` / `help <command>` | Show global help or command-specific help |
 
 Aliases: `ls` for `list`, `rm` for `delete`, `mv` for `rename`.
+
+Command-specific help examples:
+
+```bash
+oc-profile help make
+oc-profile make --help
+oc-profile switch --help
+```
+
+Unknown help topics fail with a non-zero exit status.
 
 ## Options
 

@@ -25,6 +25,18 @@ teardown() {
   assert_output --partial "COMMANDS"
 }
 
+@test "help command supports command topic" {
+  run "$OC_PROFILE" help make
+  assert_success
+  assert_output --partial "usage: oc-profile make <name> [--current]"
+}
+
+@test "help command rejects unknown topic with non-zero" {
+  run "$OC_PROFILE" help unknown-topic
+  assert_failure
+  assert_output --partial "unknown help topic 'unknown-topic'"
+}
+
 @test "version flag prints version" {
   run "$OC_PROFILE" --version
   assert_success
@@ -46,6 +58,18 @@ teardown() {
   assert_success
   assert_output --partial "USAGE"
   assert_output --partial "COMMANDS"
+}
+
+@test "make --help shows subcommand usage" {
+  run "$OC_PROFILE" make --help
+  assert_success
+  assert_output --partial "usage: oc-profile make <name> [--current]"
+}
+
+@test "switch --help shows subcommand usage" {
+  run "$OC_PROFILE" switch --help
+  assert_success
+  assert_output --partial "usage: oc-profile switch <name>"
 }
 
 @test "no arguments shows help" {

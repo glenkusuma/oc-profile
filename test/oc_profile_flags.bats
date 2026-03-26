@@ -264,10 +264,22 @@ make_fake_jq_proxy() {
   assert_output --partial "OPTIONS"
 }
 
+@test "--verbose help make works" {
+  run "$OC_PROFILE" -v help make
+  assert_success
+  assert_output --partial "usage: oc-profile make <name> [--current]"
+}
+
 @test "-vv help works" {
   run "$OC_PROFILE" -vv help
   assert_success
   assert_output --partial "OPTIONS"
+}
+
+@test "--skip-checks help make works" {
+  run "$OC_PROFILE" --skip-checks help make
+  assert_success
+  assert_output --partial "usage: oc-profile make <name> [--current]"
 }
 
 # ──────────────────────────────────────────────────────────────

@@ -505,12 +505,104 @@ cmd_version() {
   echo "${TOOL_VERSION}"
 }
 
+normalize_help_topic() {
+  local topic="${1:-}"
+  case "${topic}" in
+    ls) echo "list" ;;
+    rm) echo "delete" ;;
+    mv) echo "rename" ;;
+    -h|--help|help|"") echo "help" ;;
+    *) echo "${topic}" ;;
+  esac
+}
+
+help_init() {
+  echo "usage: oc-profile init"
+  echo ""
+  echo "initialize fresh layout for first-time setup."
+  echo "promotes existing auth.json and creates profile 'default' when credentials are non-empty."
+}
+
+help_migrate() {
+  echo "usage: oc-profile migrate"
+  echo ""
+  echo "migrate legacy layout to the current stateful layout."
+  echo "fresh environments must run 'oc-profile init' instead."
+}
+
+help_make() {
+  echo "usage: oc-profile make <name> [--current]"
+  echo ""
+  echo "create a saved profile."
+  echo "  --current  copy current live credentials into the named profile and set active."
+  echo "            first saved profile must be created with this flag."
+  echo "  (no flag) create empty placeholder profile (allowed only after first saved profile exists)."
+}
+
+help_switch() {
+  echo "usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch]"
+  echo ""
+  echo "switch active credentials to a saved profile."
+  echo "  --save-current / --no-save-current      control dirty-active save prompt behavior"
+  echo "  --trust-mismatch / --abort-on-mismatch  control hash-mismatch trust behavior"
+}
+
+help_list() {
+  echo "usage: oc-profile list"
+  echo ""
+  echo "list saved profiles and mark the active one."
+}
+
+help_which() {
+  echo "usage: oc-profile which"
+  echo ""
+  echo "print the active profile name."
+}
+
+help_rename() {
+  echo "usage: oc-profile rename <old> <new>"
+  echo ""
+  echo "rename a saved profile."
+}
+
+help_delete() {
+  echo "usage: oc-profile delete <name>"
+  echo ""
+  echo "delete a saved profile (cannot delete active or last profile)."
+}
+
+help_version() {
+  echo "usage: oc-profile version"
+  echo ""
+  echo "print tool version."
+}
+
 cmd_help() {
+  local topic="${1:-}"
+  if [[ -n "${topic}" ]]; then
+    topic="$(normalize_help_topic "${topic}")"
+    case "${topic}" in
+      help)
+        ;;
+      init) help_init; return 0 ;;
+      migrate) help_migrate; return 0 ;;
+      make) help_make; return 0 ;;
+      switch) help_switch; return 0 ;;
+      list) help_list; return 0 ;;
+      which) help_which; return 0 ;;
+      rename) help_rename; return 0 ;;
+      delete) help_delete; return 0 ;;
+      version) help_version; return 0 ;;
+      *) die_with_code "${E_GENERIC}" "unknown help topic '${1}'. Run 'oc-profile help' for usage." ;;
+    esac
+  fi
+
   echo ""
   echo -e "${BOLD}oc-profile${RESET} — manage OpenCode auth profiles"
   echo ""
   echo -e "${BOLD}USAGE${RESET}"
   echo "  oc-profile <command> [args]"
+  echo "  oc-profile help [command]"
   echo ""
   echo -e "${BOLD}COMMANDS${RESET}"
   echo "  init                             Initialize fresh layout for first-time setup"
@@ -563,6 +655,11 @@ cmd_help() {
 }
 
 cmd_init() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_init
+    return 0
+  fi
+
   local layout_state
   layout_state="$(detect_layout_state)"
 
@@ -627,6 +724,11 @@ cmd_init() {
 }
 
 cmd_migrate() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_migrate
+    return 0
+  fi
+
   local layout_state
   layout_state="$(detect_layout_state)"
   case "${layout_state}" in
@@ -731,6 +833,7 @@ cmd_make() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --help|-h) help_make; return 0 ;;
       --current) use_current=true; shift ;;
       -*) die_with_code "${E_GENERIC}" "unknown flag '$1'." ;;
       *) name="$1"; shift ;;
@@ -787,6 +890,7 @@ cmd_switch() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --help|-h) help_switch; return 0 ;;
       --save-current)      save_current="yes"; shift ;;
       --no-save-current)   save_current="no";  shift ;;
       --trust-mismatch)    trust_mismatch="yes"; shift ;;
@@ -893,6 +997,11 @@ cmd_switch() {
 }
 
 cmd_list() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_list
+    return 0
+  fi
+
   if state_is_valid; then
     local current
     current="$(state_active_profile)"
@@ -930,6 +1039,11 @@ cmd_list() {
 }
 
 cmd_which() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_which
+    return 0
+  fi
+
   state_is_valid || die_with_code "${E_GENERIC}" "no active profile found. Run 'oc-profile make <name> --current' to save current live credentials first."
   local current
   current="$(state_active_profile)"
@@ -938,6 +1052,11 @@ cmd_which() {
 }
 
 cmd_delete() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_delete
+    return 0
+  fi
+
   local name="${1:-}"
   [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "usage: oc-profile delete <name>"
   validate_profile_name "${name}"
@@ -975,6 +1094,11 @@ cmd_delete() {
 }
 
 cmd_rename() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    help_rename
+    return 0
+  fi
+
   local old="${1:-}"
   local new="${2:-}"
   [[ -n "${old}" && -n "${new}" ]] || die_with_code "${E_GENERIC}" "usage: oc-profile rename <old> <new>"
@@ -1035,7 +1159,13 @@ for arg in "$@"; do
         remaining_args+=("${arg}")
       fi
       ;;
-    --help|-h) cmd_help; exit 0 ;;
+    --help|-h)
+      if [[ -z "${cmd}" ]]; then
+        cmd_help
+        exit 0
+      fi
+      remaining_args+=("${arg}")
+      ;;
     --version) cmd_version; exit 0 ;;
     --*)
       # Check if it's a known command-specific flag
@@ -1085,11 +1215,11 @@ case "${cmd}" in
   migrate)           cmd_migrate "$@" ;;
   make)              cmd_make "$@" ;;
   switch)            cmd_switch "$@" ;;
-  list|ls)           cmd_list ;;
-  which)             cmd_which ;;
+  list|ls)           cmd_list "$@" ;;
+  which)             cmd_which "$@" ;;
   delete|rm)         cmd_delete "$@" ;;
   rename|mv)         cmd_rename "$@" ;;
   version|--version) cmd_version ;;
-  help|--help|-h)    cmd_help ;;
+  help|--help|-h)    cmd_help "$@" ;;
   *) die "unknown command '${cmd}'. Run 'oc-profile help' for usage." ;;
 esac
