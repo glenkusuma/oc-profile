@@ -12,16 +12,31 @@ STATE_FILE="${AUTH_DIR}/oc-profile.json"
 LOCK_FILE="${AUTH_DIR}/oc-profile.lock"
 TOOL_VERSION="0.1.0-rc.1"
 
+readonly USAGE_MAKE="usage: oc-profile make <name> [--current]"
+readonly USAGE_SAVE="usage: oc-profile save <name> [--set-active]"
+readonly USAGE_SWITCH="usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch] [--allow-empty-target]"
+readonly USAGE_LIST="usage: oc-profile list [--details|--detail|-a]"
+
+# Shared local-flag ownership map (parser + help)
+readonly -a LOCAL_FLAGS_MAKE=(--current)
+readonly -a LOCAL_FLAGS_SAVE=(--set-active)
+readonly -a LOCAL_FLAGS_SWITCH=(--save-current --no-save-current --trust-mismatch --abort-on-mismatch --allow-empty-target)
+readonly -a LOCAL_FLAGS_LIST=(--details --detail -a)
+
+# Skip-checks capability registries (template-style provider pattern)
+readonly -a COMMANDS_CAPABILITY_EXEMPT=(help version)
+readonly -a COMMANDS_REQUIRE_JQ_IN_SKIP_MODE=(init migrate make save switch list which delete rename)
+readonly -a COMMANDS_REQUIRE_FLOCK_IN_SKIP_MODE=(init migrate make save switch delete rename)
+
 # ── Exit codes ─────────────────────────────────────────────
 # Deterministic exit codes; all mutating paths use these.
-readonly E_OK=0
 readonly E_GENERIC=1
 readonly E_LEGACY=10       # legacy layout detected; run 'migrate'
 readonly E_PROMPT_NONINT=11 # prompt required but session is non-interactive
 readonly E_HASH_MISMATCH=12 # hash mismatch refused
 readonly E_JQ_MISSING=13   # jq not found or unusable
 readonly E_LOCK_BUSY=14    # lock already held by another process
-readonly E_SKIP_CHECKS_BLOCKED=15  # operation requires strict mode
+readonly E_SKIP_CHECKS_BLOCKED=15  # capability unavailable in --skip-checks mode
 readonly E_INIT_REQUIRED=16  # layout requires initialization
 
 # ── Mode flags ──────────────────────────────────────────────
@@ -47,6 +62,11 @@ die_with_code() { local code="$1"; shift; echo -e "${RED}error:${RESET} $*" >&2;
 info()          { echo -e "${CYAN}$1${RESET}"; }
 success()       { echo -e "${GREEN}$1${RESET}"; }
 warn()          { echo -e "${YELLOW}$1${RESET}"; }
+
+die_unknown_flag() {
+  local flag="$1"
+  die_with_code "${E_GENERIC}" "unknown flag '${flag}'."
+}
 
 log_v() {
   [[ "${VERBOSE:-0}" -ge 1 ]] && info "$1"
@@ -299,6 +319,7 @@ state_has_profile() {
   local jq_bin
   jq_bin="$(require_jq)"
   [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
+  # shellcheck disable=SC2016
   if "${jq_bin}" -e --arg n "${name}" '.profiles[$n] != null' "${STATE_FILE}" >/dev/null 2>&1; then
     return 0
   fi
@@ -320,6 +341,7 @@ state_profile_sha() {
   local jq_bin
   jq_bin="$(require_jq)"
   [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
+  # shellcheck disable=SC2016
   "${jq_bin}" -r --arg n "${name}" '.profiles[$n].sha256 // empty' "${STATE_FILE}" 2>/dev/null || true
 }
 
@@ -499,6 +521,43 @@ discover_active_profile() {
   echo ""
 }
 
+format_file_mtime_utc() {
+  local file="$1"
+  local ts
+  ts="$(stat -c '%Y' "${file}" 2>/dev/null || stat -f '%m' "${file}" 2>/dev/null || true)"
+  if [[ -z "${ts}" ]]; then
+    echo "<unknown>"
+    return 0
+  fi
+  date -u -d "@${ts}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r "${ts}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>"
+}
+
+profile_details_summary() {
+  local profile_name="$1"
+  local profile_path="${PROFILES_DIR}/${profile_name}.json"
+  local jq_bin
+  jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
+
+  local mtime
+  mtime="$(format_file_mtime_utc "${profile_path}")"
+
+  if ! "${jq_bin}" -e . "${profile_path}" >/dev/null 2>&1; then
+    printf 'hash=<invalid> mtime=%s providers=<invalid-json>' "${mtime}"
+    return 0
+  fi
+
+  local hash12
+  hash12="$(canonical_hash_file "${profile_path}" | cut -c1-12)"
+
+  local provider_count
+  provider_count="$("${jq_bin}" -r 'if type=="object" then (keys|length) else 0 end' "${profile_path}" 2>/dev/null || echo 0)"
+  local provider_keys
+  provider_keys="$("${jq_bin}" -r 'if type=="object" then (keys|sort|join(",")) else "<non-object>" end' "${profile_path}" 2>/dev/null || echo "<invalid-json>")"
+
+  printf 'hash=%s mtime=%s providers=%s[%s]' "${hash12}" "${mtime}" "${provider_count}" "${provider_keys}"
+}
+
 # ── Commands ───────────────────────────────────────────────
 
 cmd_version() {
@@ -513,6 +572,139 @@ normalize_help_topic() {
     mv) echo "rename" ;;
     -h|--help|help|"") echo "help" ;;
     *) echo "${topic}" ;;
+  esac
+}
+
+normalize_command_token() {
+  local token="${1:-}"
+  case "${token}" in
+    ls) echo "list" ;;
+    rm) echo "delete" ;;
+    mv) echo "rename" ;;
+    --help|-h) echo "help" ;;
+    --version) echo "version" ;;
+    *) echo "${token}" ;;
+  esac
+}
+
+is_command_token() {
+  local token
+  token="$(normalize_command_token "${1:-}")"
+  case "${token}" in
+    init|migrate|make|save|switch|list|which|delete|rename|version|help)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+flag_in_set() {
+  local needle="${1:-}"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if [[ "${needle}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+join_flags_csv() {
+  local first=1
+  local item
+  for item in "$@"; do
+    if [[ ${first} -eq 1 ]]; then
+      printf '%s' "${item}"
+      first=0
+    else
+      printf ', %s' "${item}"
+    fi
+  done
+}
+
+has_usable_jq() {
+  local jq_bin=""
+  if [[ -n "${OC_PROFILE_JQ:-}" && -x "${OC_PROFILE_JQ}" ]]; then
+    jq_bin="${OC_PROFILE_JQ}"
+  else
+    jq_bin="$(command -v jq || true)"
+  fi
+  [[ -n "${jq_bin}" ]] || return 1
+  "${jq_bin}" --version >/dev/null 2>&1
+}
+
+has_flock_binary() {
+  command -v flock >/dev/null 2>&1
+}
+
+command_is_capability_exempt() {
+  local cmd="${1:-}"
+  flag_in_set "${cmd}" "${COMMANDS_CAPABILITY_EXEMPT[@]}"
+}
+
+command_requires_jq_in_skip_mode() {
+  local cmd="${1:-}"
+  flag_in_set "${cmd}" "${COMMANDS_REQUIRE_JQ_IN_SKIP_MODE[@]}"
+}
+
+command_requires_flock_in_skip_mode() {
+  local cmd="${1:-}"
+  flag_in_set "${cmd}" "${COMMANDS_REQUIRE_FLOCK_IN_SKIP_MODE[@]}"
+}
+
+require_skip_mode_capabilities_for_command() {
+  local cmd="${1:-}"
+  command_is_capability_exempt "${cmd}" && return 0
+
+  local missing_jq="no"
+  local missing_flock="no"
+
+  if command_requires_jq_in_skip_mode "${cmd}"; then
+    has_usable_jq || missing_jq="yes"
+  fi
+
+  if command_requires_flock_in_skip_mode "${cmd}"; then
+    has_flock_binary || missing_flock="yes"
+  fi
+
+  if [[ "${missing_jq}" == "yes" && "${missing_flock}" == "yes" ]]; then
+    die_with_code "${E_SKIP_CHECKS_BLOCKED}" \
+      "operation '${cmd}' requires jq and flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+  fi
+
+  if [[ "${missing_jq}" == "yes" ]]; then
+    die_with_code "${E_SKIP_CHECKS_BLOCKED}" \
+      "operation '${cmd}' requires jq in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+  fi
+
+  if [[ "${missing_flock}" == "yes" ]]; then
+    die_with_code "${E_SKIP_CHECKS_BLOCKED}" \
+      "operation '${cmd}' requires flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+  fi
+}
+
+flag_is_local_for_command() {
+  local cmd="${1:-}"
+  local flag="${2:-}"
+  case "${cmd}" in
+    make)
+      flag_in_set "${flag}" "${LOCAL_FLAGS_MAKE[@]}"
+      ;;
+    save)
+      flag_in_set "${flag}" "${LOCAL_FLAGS_SAVE[@]}"
+      ;;
+    switch)
+      flag_in_set "${flag}" "${LOCAL_FLAGS_SWITCH[@]}"
+      ;;
+    list)
+      flag_in_set "${flag}" "${LOCAL_FLAGS_LIST[@]}"
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
@@ -531,26 +723,36 @@ help_migrate() {
 }
 
 help_make() {
-  echo "usage: oc-profile make <name> [--current]"
+  echo "${USAGE_MAKE}"
   echo ""
   echo "create a saved profile."
-  echo "  --current  copy current live credentials into the named profile and set active."
+  echo "  $(join_flags_csv "${LOCAL_FLAGS_MAKE[@]}")  copy current live credentials into the named profile and set active."
   echo "            first saved profile must be created with this flag."
   echo "  (no flag) create empty placeholder profile (allowed only after first saved profile exists)."
 }
 
+help_save() {
+  echo "${USAGE_SAVE}"
+  echo ""
+  echo "update an existing saved profile from current live credentials."
+  echo "  $(join_flags_csv "${LOCAL_FLAGS_SAVE[@]}")  set <name> as active after saving."
+}
+
 help_switch() {
-  echo "usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch]"
+  echo "${USAGE_SWITCH}"
   echo ""
   echo "switch active credentials to a saved profile."
-  echo "  --save-current / --no-save-current      control dirty-active save prompt behavior"
-  echo "  --trust-mismatch / --abort-on-mismatch  control hash-mismatch trust behavior"
+  echo "  $(join_flags_csv "${LOCAL_FLAGS_SWITCH[@]}")"
+  echo "    --save-current / --no-save-current      control dirty-active save prompt behavior"
+  echo "    --trust-mismatch / --abort-on-mismatch  control hash-mismatch trust behavior"
+  echo "  --allow-empty-target                    allow switching to '{}' placeholder profiles"
 }
 
 help_list() {
-  echo "usage: oc-profile list"
+  echo "${USAGE_LIST}"
   echo ""
   echo "list saved profiles and mark the active one."
+  echo "  $(join_flags_csv "${LOCAL_FLAGS_LIST[@]}")  show hash, mtime, and provider summary per profile"
 }
 
 help_which() {
@@ -577,6 +779,23 @@ help_version() {
   echo "print tool version."
 }
 
+help_render_option_lines() {
+  echo "  --skip-checks                    Skip runtime dependency checks (jq, flock)"
+  echo "  --always-checks                  Force strict mode (default)"
+  echo "  --dry-run                        Show planned actions without executing"
+  echo "  -v, --verbose                    Enable verbose output"
+  echo "  -vv                              Enable extra verbose output"
+}
+
+help_show_examples() {
+  echo "### TIPS & EXAMPLES"
+  echo "  oc-profile init"
+  echo "  oc-profile make work --current"
+  echo "  oc-profile make personal"
+  echo "  oc-profile switch personal"
+  echo "  oc-profile list --details"
+}
+
 cmd_help() {
   local topic="${1:-}"
   if [[ -n "${topic}" ]]; then
@@ -587,6 +806,7 @@ cmd_help() {
       init) help_init; return 0 ;;
       migrate) help_migrate; return 0 ;;
       make) help_make; return 0 ;;
+      save) help_save; return 0 ;;
       switch) help_switch; return 0 ;;
       list) help_list; return 0 ;;
       which) help_which; return 0 ;;
@@ -608,6 +828,7 @@ cmd_help() {
   echo "  init                             Initialize fresh layout for first-time setup"
   echo "  migrate                          Migrate legacy installs to the current layout"
   echo "  make <name> [--current]          Save current auth as a profile, or create a placeholder"
+  echo "  save <name> [--set-active]       Update an existing saved profile from current live auth"
   echo "  switch <name>                    Switch live auth to a saved profile (restart opencode)"
   echo "  list|ls                          List all profiles"
   echo "  which                            Show the active profile name"
@@ -617,11 +838,7 @@ cmd_help() {
   echo "  help|--help|-h                   Show this help"
   echo ""
   echo -e "${BOLD}OPTIONS${RESET}"
-  echo "  --skip-checks                    Skip runtime dependency checks (jq, flock)"
-  echo "  --always-checks                  Force strict mode (default)"
-  echo "  --dry-run                        Show planned actions without executing"
-  echo "  -v, --verbose                    Enable verbose output"
-  echo "  -vv                              Enable extra verbose output"
+  help_render_option_lines
   echo ""
   echo -e "${BOLD}EXIT CODES${RESET}"
   echo "  0  success"
@@ -630,7 +847,7 @@ cmd_help() {
   echo "  12 hash mismatch refused"
   echo "  13 jq missing or unusable"
   echo "  14 lock busy"
-  echo "  15 operation requires strict mode (skip-checks not allowed)"
+  echo "  15 operation unavailable in --skip-checks mode (missing required capability)"
   echo "  16 fresh layout requires init"
   echo ""
   echo -e "${BOLD}ENVIRONMENT${RESET}"
@@ -645,6 +862,8 @@ cmd_help() {
   echo "  5. restart opencode"
   echo "  6. /connect in opencode with account B"
   echo "  7. oc-profile make personal --current"
+  echo ""
+  help_show_examples
   echo ""
   echo -e "${BOLD}FILES${RESET}"
   echo "  ${AUTH_FILE}              (symlink -> profiles/auth.active.json)"
@@ -766,7 +985,10 @@ cmd_migrate() {
   fi
 
   # One-time bootstrap backup — created only if the backup directory is empty.
-  if [[ -z "$(ls -1 "${BOOTSTRAP_BACKUP_DIR}" 2>/dev/null | head -n 1 || true)" ]]; then
+  shopt -s nullglob
+  local backup_entries=("${BOOTSTRAP_BACKUP_DIR}"/*)
+  shopt -u nullglob
+  if [[ ${#backup_entries[@]} -eq 0 ]]; then
     log_v "Preparing bootstrap backup..."
     local source_file=""
     if [[ -L "${AUTH_FILE}" ]]; then
@@ -835,7 +1057,7 @@ cmd_make() {
     case "$1" in
       --help|-h) help_make; return 0 ;;
       --current) use_current=true; shift ;;
-      -*) die_with_code "${E_GENERIC}" "unknown flag '$1'." ;;
+      -*) die_unknown_flag "$1" ;;
       *) name="$1"; shift ;;
     esac
   done
@@ -883,10 +1105,87 @@ cmd_make() {
   fi
 }
 
+cmd_save() {
+  local name=""
+  local set_active=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) help_save; return 0 ;;
+      --set-active) set_active=true; shift ;;
+      -*) die_unknown_flag "$1" ;;
+      *)
+        if [[ -z "${name}" ]]; then
+          name="$1"
+          shift
+        else
+          die_with_code "${E_GENERIC}" "${USAGE_SAVE}"
+        fi
+        ;;
+    esac
+  done
+
+  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "${USAGE_SAVE}"
+  validate_profile_name "${name}"
+
+  local layout_state
+  layout_state="$(detect_layout_state)"
+  case "${layout_state}" in
+    initialized|broken)
+      ;;
+    legacy)
+      die_with_code "${E_LEGACY}" "legacy layout detected; run 'oc-profile migrate' first."
+      ;;
+    fresh)
+      die_with_code "${E_INIT_REQUIRED}" "fresh environment detected; run 'oc-profile init' first."
+      ;;
+    *)
+      die_with_code "${E_GENERIC}" "layout is inconsistent; fix auth/state files or run 'oc-profile init' on a fresh setup."
+      ;;
+  esac
+
+  state_is_valid \
+    || die_with_code "${E_GENERIC}" "layout is inconsistent; fix auth/state files or run 'oc-profile init' on a fresh setup."
+
+  log_v "Acquiring lock..."
+  acquire_lock
+  require_jq >/dev/null
+  ensure_dirs
+
+  state_has_profile "${name}" \
+    || die_with_code "${E_GENERIC}" "profile '${name}' does not exist."
+  [[ -f "${ACTIVE_CREDENTIALS_FILE}" ]] \
+    || die_with_code "${E_GENERIC}" "live credentials file not found (${ACTIVE_CREDENTIALS_FILE})."
+
+  run_mutation_fn "copy ${ACTIVE_CREDENTIALS_FILE} -> ${PROFILES_DIR}/${name}.json" atomic_copy_json "${ACTIVE_CREDENTIALS_FILE}" "${PROFILES_DIR}/${name}.json"
+
+  local current
+  current="$(state_active_profile)"
+  if [[ "${set_active}" == "true" ]]; then
+    current="${name}"
+  fi
+  run_mutation_fn "rebuild state with active profile '${current}'" state_rebuild "${current}"
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    if [[ "${set_active}" == "true" ]]; then
+      success "[DRY-RUN] save '${name}' (--set-active) completed with no changes."
+    else
+      success "[DRY-RUN] save '${name}' completed with no changes."
+    fi
+  else
+    if [[ "${set_active}" == "true" ]]; then
+      success "saved current live credentials to '${name}' and set as active."
+    else
+      success "saved current live credentials to '${name}'."
+    fi
+  fi
+}
+
 cmd_switch() {
   local name=""
   local save_current=""
   local trust_mismatch=""
+  local allow_empty_target=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -895,13 +1194,13 @@ cmd_switch() {
       --no-save-current)   save_current="no";  shift ;;
       --trust-mismatch)    trust_mismatch="yes"; shift ;;
       --abort-on-mismatch) trust_mismatch="no";  shift ;;
-      -*) die_with_code "${E_GENERIC}" "unknown flag '$1'." ;;
+      --allow-empty-target) allow_empty_target="yes"; shift ;;
+      -*) die_unknown_flag "$1" ;;
       *) name="$1"; shift ;;
     esac
   done
 
-  [[ -n "${name}" ]] \
-    || die_with_code "${E_GENERIC}" "usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch]"
+  [[ -n "${name}" ]] || die_with_code "${E_GENERIC}" "${USAGE_SWITCH}"
   validate_profile_name "${name}"
 
   require_initialized_layout
@@ -912,10 +1211,6 @@ cmd_switch() {
 
   state_has_profile "${name}" \
     || die_with_code "${E_GENERIC}" "profile '${name}' does not exist. Run 'oc-profile list' to see available profiles."
-
-  # Capture target profile hash from state before any potential rebuild.
-  local recorded_sha
-  recorded_sha="$(state_profile_sha "${name}")"
 
   local current
   current="$(state_active_profile)"
@@ -931,6 +1226,29 @@ cmd_switch() {
 
   local interactive
   is_interactive && interactive="yes" || interactive="no"
+
+  # Empty-target safeguard runs before dirty-active and hash-mismatch gates.
+  local jq_bin
+  jq_bin="$(require_jq)"
+  [[ -n "${jq_bin}" ]] || die_with_code "${E_JQ_MISSING}" "jq >= 1.8 is required. Install jq and retry."
+  local target_is_empty="no"
+  if "${jq_bin}" -e 'type=="object" and (keys|length)==0' "${PROFILES_DIR}/${name}.json" >/dev/null 2>&1; then
+    target_is_empty="yes"
+  fi
+  if [[ "${target_is_empty}" == "yes" && "${allow_empty_target}" != "yes" ]]; then
+    if [[ "${interactive}" != "yes" ]]; then
+      die_with_code "${E_PROMPT_NONINT}" \
+        "prompt required to switch to empty profile (non-interactive: pass --allow-empty-target)."
+    fi
+    local allow_empty_prompt
+    allow_empty_prompt="$(prompt_yes_no "target profile '${name}' is empty ({}). Continue switch?" "no")"
+    [[ "${allow_empty_prompt}" == "yes" ]] \
+      || die_with_code "${E_GENERIC}" "switch to empty profile refused."
+  fi
+
+  # Capture target profile hash from state before any potential rebuild.
+  local recorded_sha
+  recorded_sha="$(state_profile_sha "${name}")"
 
   # ── Dirty-active detection ───────────────────────────────
   # Only relevant when there is a known current profile whose credentials we could save.
@@ -997,10 +1315,15 @@ cmd_switch() {
 }
 
 cmd_list() {
-  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    help_list
-    return 0
-  fi
+  local show_details=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) help_list; return 0 ;;
+      --details|--detail|-a) show_details=true; shift ;;
+      -*) die_unknown_flag "$1" ;;
+      *) die_with_code "${E_GENERIC}" "${USAGE_LIST}" ;;
+    esac
+  done
 
   if state_is_valid; then
     local current
@@ -1021,12 +1344,21 @@ cmd_list() {
     echo -e "${BOLD}Saved profiles:${RESET}"
     echo ""
     for p in "${profiles[@]}"; do
+      local details=""
+      if [[ "${show_details}" == "true" ]]; then
+        details=" $(profile_details_summary "${p}")"
+      fi
       if [[ "${p}" == "${current}" ]]; then
-        echo -e "  ${GREEN}* ${p}${RESET} ${DIM}(active)${RESET}"
+        echo -e "  ${GREEN}* ${p}${RESET} ${DIM}(active)${RESET}${details}"
       else
-        echo -e "    ${p}"
+        echo -e "    ${p}${details}"
       fi
     done
+    if [[ -z "${current}" ]]; then
+      info "no active saved profile is selected (live credentials may still exist)."
+      info "run 'oc-profile save <existing-profile>' to update a saved profile from live credentials."
+      info "run 'oc-profile switch <name>' to set an active saved profile."
+    fi
     echo ""
     return 0
   fi
@@ -1047,7 +1379,13 @@ cmd_which() {
   state_is_valid || die_with_code "${E_GENERIC}" "no active profile found. Run 'oc-profile make <name> --current' to save current live credentials first."
   local current
   current="$(state_active_profile)"
-  [[ -n "${current}" ]] || die_with_code "${E_GENERIC}" "no active profile found. Run 'oc-profile make <name> --current' to save current live credentials first."
+  if [[ -z "${current}" ]]; then
+    if state_has_any_profiles; then
+      die_with_code "${E_GENERIC}" "no active saved profile is set. Live credentials may exist without a named active profile. Run 'oc-profile save <existing-profile>' to update one, then 'oc-profile switch <name>' to set active."
+    else
+      die_with_code "${E_GENERIC}" "no active profile found. Live credentials may exist without a named saved profile. Run 'oc-profile make <name> --current' to save current live credentials first."
+    fi
+  fi
   echo "${current}"
 }
 
@@ -1133,80 +1471,108 @@ cmd_rename() {
 DRY_RUN=false
 VERBOSE=0
 
-# Extract command first (first non-flag argument)
-# Then parse remaining arguments as global flags
-# This allows: ./oc-profile make work --dry-run
-cmd=""
-# Parse arguments: extract command and global flags
-# Global flags can appear before OR after the command
-remaining_args=()
-cmd=""
+# Shared ownership map for parser + command help.
+# Global: --skip-checks --always-checks --dry-run -v/--verbose --help/-h --version
+# Local patterns/help strings are defined in LOCAL_FLAGS_* constants near the top.
 
+expanded_args=()
 for arg in "$@"; do
-  # Check if this is a global flag
+  if [[ "${arg}" =~ ^-[^-]{2,}$ ]]; then
+    short_group="${arg#-}"
+    i=0
+    while (( i < ${#short_group} )); do
+      ch="${short_group:$i:1}"
+      case "${ch}" in
+        v|h|a) expanded_args+=("-${ch}") ;;
+        *) die_unknown_flag "-${ch}" ;;
+      esac
+      i=$((i + 1))
+    done
+  else
+    expanded_args+=("${arg}")
+  fi
+done
+
+cmd=""
+canonical_cmd=""
+remaining_args=()
+for arg in "${expanded_args[@]}"; do
+  if [[ -z "${cmd}" && "${arg}" != -* ]]; then
+    cmd="${arg}"
+    canonical_cmd="$(normalize_command_token "${cmd}")"
+    continue
+  fi
+  remaining_args+=("${arg}")
+done
+
+want_global_help="no"
+want_version="no"
+saw_skip_checks="no"
+saw_always_checks="no"
+parsed_args=()
+for arg in "${remaining_args[@]}"; do
   case "${arg}" in
-    --skip-checks) SKIP_CHECKS=true ;;
-    --always-checks) SKIP_CHECKS=false ;;
+    --skip-checks)
+      saw_skip_checks="yes"
+      ;;
+    --always-checks)
+      saw_always_checks="yes"
+      ;;
     --dry-run) DRY_RUN=true ;;
     -v|--verbose) VERBOSE=$((VERBOSE + 1)) ;;
-    -vv) VERBOSE=2 ;;
-    -vvv) VERBOSE=3 ;;
-    -v*)
-      # Handle grouped verbose flags like -vvv and -vvvv.
-      if [[ "${arg}" =~ ^-v+$ ]]; then
-        VERBOSE=$((VERBOSE + ${#arg} - 1))
-      else
-        remaining_args+=("${arg}")
-      fi
-      ;;
     --help|-h)
       if [[ -z "${cmd}" ]]; then
-        cmd_help
-        exit 0
+        want_global_help="yes"
+      else
+        parsed_args+=("${arg}")
       fi
-      remaining_args+=("${arg}")
       ;;
-    --version) cmd_version; exit 0 ;;
-    --*)
-      # Check if it's a known command-specific flag
-      case "${arg}" in
-        --current|--save-current|--no-save-current|--trust-mismatch|--abort-on-mismatch)
-          # Command-specific flag - pass to command
-          remaining_args+=("${arg}")
-          ;;
-        *)
-          # Unknown long flag - error
-          echo -e "${RED}error:${RESET} unknown flag '${arg}'" >&2
-          exit 1
-          ;;
-      esac
+    --version)
+      if [[ -z "${cmd}" ]]; then
+        want_version="yes"
+      else
+        parsed_args+=("${arg}")
+      fi
+      ;;
+    --*|-a)
+      if [[ -n "${cmd}" ]] && flag_is_local_for_command "${canonical_cmd}" "${arg}"; then
+        parsed_args+=("${arg}")
+      else
+        die_unknown_flag "${arg}"
+      fi
       ;;
     -*)
-      # Unknown short flag - pass to command (let command handle error)
-      remaining_args+=("${arg}")
+      die_unknown_flag "${arg}"
       ;;
     *)
-      # Non-flag argument
-      if [[ -z "${cmd}" ]]; then
-        # First non-flag is the command
-        cmd="${arg}"
-      else
-        # Additional non-flag args go to command
-        remaining_args+=("${arg}")
-      fi
+      parsed_args+=("${arg}")
       ;;
   esac
 done
 
-# If no command found, default to help
-if [[ -z "${cmd}" ]]; then
-  cmd="help"
+if [[ "${saw_always_checks}" == "yes" ]]; then
+  SKIP_CHECKS=false
+elif [[ "${saw_skip_checks}" == "yes" ]]; then
+  SKIP_CHECKS=true
 fi
 
-# Set $@ to remaining args for command
-set -- "${remaining_args[@]}"
+if [[ -z "${cmd}" ]]; then
+  if [[ "${want_version}" == "yes" ]]; then
+    cmd_version
+    exit 0
+  fi
+  if [[ "${want_global_help}" == "yes" || ${#parsed_args[@]} -eq 0 ]]; then
+    cmd_help
+    exit 0
+  fi
+  cmd="help"
+  canonical_cmd="help"
+fi
+
+set -- "${parsed_args[@]}"
 
 if [[ "${SKIP_CHECKS}" == "true" ]]; then
+  require_skip_mode_capabilities_for_command "${canonical_cmd}"
   warn "WARNING: --skip-checks is active. Runtime dependency checks (jq, flock) are bypassed."
 fi
 
@@ -1214,6 +1580,7 @@ case "${cmd}" in
   init)              cmd_init "$@" ;;
   migrate)           cmd_migrate "$@" ;;
   make)              cmd_make "$@" ;;
+  save)              cmd_save "$@" ;;
   switch)            cmd_switch "$@" ;;
   list|ls)           cmd_list "$@" ;;
   which)             cmd_which "$@" ;;
