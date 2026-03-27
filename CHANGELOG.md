@@ -7,7 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-- No unreleased changes.
+### Added
+### Changed
+
 
 ## [0.1.0-rc.1] - 2026-03-24
 
@@ -22,6 +24,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `--always-checks` flag to force strict mode (default behavior).
 - `OC_PROFILE_SKIP_CHECKS=true` environment variable for non-interactive pipelines.
 - Explicit layout-state classifier (`fresh`, `legacy`, `initialized`, `broken`) to route operators to `init` vs `migrate` deterministically.
+- Added `save <name>` to update an existing saved profile from live credentials, with `--set-active` to immediately set the saved profile active.
+- Added `list` details mode with `--details` plus aliases `--detail` and `-a`.
 
 ### Changed
 - Switching now updates live credentials by atomically copying into `profiles/auth.active.json` and refreshing state metadata.
@@ -38,6 +42,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Strict-mode dependency enforcement now requires `jq >= 1.8` with explicit install guidance.
 - Added command-scoped help routing: `help <command>` and `<command> --help|-h` now print subcommand usage and behavior notes.
 - Unknown help topics now return a deterministic non-zero error with guidance to run `oc-profile help`.
+- Reworked argument parsing for deterministic GNU-style option placement with command-local ownership validation, including grouped short handling for `-a`, `-h`, and repeated `-v`.
+- `switch` now guards empty `{}` target profiles and requires explicit `--allow-empty-target` intent in non-interactive sessions.
+- Improved `which`/`list` guidance when live credentials exist but no named active saved profile is set.
+- Updated command help and README to document new commands, flags, and parser behavior.
 
 ### Security
 - Preserved target-profile tamper detection ordering during dirty-active save flows by capturing target recorded hash before state rebuild.

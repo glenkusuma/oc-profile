@@ -88,9 +88,13 @@ oc-profile init
 | `init` | Initialize a fresh environment into the v0.1.0 stateful layout (creates `default` when existing auth is present) |
 | `make <name> --current` | Save current auth as a named profile and set it active |
 | `make <name>` | Create an empty placeholder profile (allowed only after a first saved profile exists) |
+| `save <name>` | Update an existing saved profile from current live auth |
+| `save <name> --set-active` | Update an existing saved profile and set it active |
 | `migrate` | Migrate legacy layout to the v0.1.0 stateful layout |
 | `switch <name>` | Switch to a profile (requires restart) |
+| `switch <name> --allow-empty-target` | Explicitly allow switching to an empty `{}` placeholder profile |
 | `list` | List all profiles |
+| `list --details` | List profiles with hash, mtime, and provider summary |
 | `which` | Print the active profile name |
 | `rename <old> <new>` | Rename a profile |
 | `delete <name>` | Delete a profile |
@@ -119,6 +123,13 @@ Unknown help topics fail with a non-zero exit status.
 | `-v`, `--verbose` | Enable verbose output. |
 | `-vv` | Enable extra verbose output. |
 
+Command-local flags:
+
+- `make`: `--current`
+- `save`: `--set-active`
+- `switch`: `--save-current`, `--no-save-current`, `--trust-mismatch`, `--abort-on-mismatch`, `--allow-empty-target`
+- `list`: `--details`, `--detail`, `-a`
+
 Environment variables:
 - `OC_PROFILE_SKIP_CHECKS=true` — Enable skip-checks mode (alternative to flag)
 - `OC_PROFILE_JQ=/path/to/jq` — Use specific jq binary
@@ -134,6 +145,18 @@ oc-profile delete old-profile --dry-run
 ```
 
 Dry-run executes the same validation and decision path as a real run (including lock acquisition), but suppresses filesystem/state mutations. Use `-v` or `-vv` for more detail.
+
+### Option placement and ownership
+
+`oc-profile` supports GNU-style option placement for global and command-local flags:
+
+```bash
+oc-profile switch work --save-current -v
+oc-profile --dry-run --save-current switch work -v
+oc-profile -av list
+```
+
+Invalid flag ownership fails deterministically with `error: unknown flag '<flag>'`.
 
 ### First profile safety
 
@@ -196,6 +219,7 @@ Since OpenCode reads auth at startup, restart OpenCode after switching.
 - Cannot delete the currently active profile
 - Uses lock-based coordination for mutating operations
 - Uses canonical hash checks and explicit trust flow on profile mismatch
+- Requires explicit opt-in (`--allow-empty-target`) to switch into empty `{}` placeholder profiles in non-interactive sessions
 - Fails fast in non-interactive sessions when a prompt would be required
 - Creates a one-time bootstrap backup during migration
 - Warns if OpenCode is running when you switch (restart required to apply)
@@ -204,6 +228,8 @@ Since OpenCode reads auth at startup, restart OpenCode after switching.
 ## Note on token expiry
 
 OAuth tokens expire. OpenCode refreshes the active profile's token automatically, but a saved profile you haven't used in a while may go stale. If that happens, switch to it, run `/connect` again in OpenCode, and re-save with `make <name> --current`.
+
+If the profile already exists, use `save <name>` instead of recreating it.
 
 ## Testing
 
