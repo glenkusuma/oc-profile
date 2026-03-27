@@ -34,6 +34,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Test naming and section comments were cleaned for consistency.
 - Install/setup documentation now explicitly declares runtime dependencies (`jq >= 1.8`, `flock`) and dependency-related failure behavior.
 - Renamed `--unsafe` mode to `--skip-checks` for clearer semantics.
+- `--skip-checks` now enforces command-scoped capability gates with deterministic exit code `15` when required runtime tools are unavailable (`jq` and/or `flock`).
+- `--always-checks` now explicitly takes precedence over `--skip-checks` regardless of flag order.
+- Skip-mode error/help text now documents compatibility semantics and rerun guidance (`without --skip-checks` or `with --always-checks`).
 - Refactored `--dry-run` to use inline execution-path gating so runtime validations and lock flow match real execution while mutating operations are suppressed.
 - Expanded flag-focused BATS coverage for inline dry-run behavior, side-effect suppression, grouped verbosity parsing, and first-run guard behavior.
 - Fresh first-run initialization now auto-creates `default` from existing non-empty credentials during `init`.
