@@ -14,6 +14,18 @@ teardown() {
   teardown_test_env
 }
 
+run_with_minimal_path() {
+  local path_value="$1"
+  shift
+  run env PATH="${path_value}" "$@"
+}
+
+empty_bin_path() {
+  local dir="${BATS_TEST_TMPDIR}/empty-bin"
+  mkdir -p "${dir}"
+  echo "${dir}"
+}
+
 # ──────────────────────────────────────────────────────────────
 # switch
 # ──────────────────────────────────────────────────────────────
@@ -158,4 +170,15 @@ teardown() {
   local target
   target="$(readlink "${AUTH_FILE}")"
   assert [ "${target}" = "${ACTIVE_CREDENTIALS_FILE}" ]
+}
+
+@test "switch in skip mode fails with exit 15 when flock capability is unavailable" {
+  local real_jq
+  real_jq="$(command -v jq)"
+  export OC_PROFILE_JQ="${real_jq}"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks switch work
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'switch' requires flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
 }

@@ -37,7 +37,9 @@ Failure behavior:
 
 - In strict mode (default), if `jq` is missing/unusable/older than `1.8`, commands that require it fail with deterministic exit code `13` and install guidance.
 - If `flock` is unavailable, mutating commands (`init`, `make`, `switch`, `rename`, `delete`, `migrate`) fail fast because safe lock acquisition is not possible.
-- `--skip-checks` bypasses dependency preflight checks (including the jq version floor). Use it only when you accept reduced safety guarantees.
+- `--skip-checks` enables compatibility mode. Commands that require unavailable `jq`/`flock` capabilities fail deterministically with exit code `15`. In this mode, `jq` capability means a usable `jq` binary (the strict `>= 1.8` version floor is not enforced).
+- `--always-checks` always takes precedence over `--skip-checks` when both are present.
+- `help` and `version` remain capability-exempt in compatibility mode.
 
 ## Setup
 
@@ -117,8 +119,8 @@ Unknown help topics fail with a non-zero exit status.
 
 | Option | Description |
 |---|---|
-| `--skip-checks` | Skip runtime dependency checks (jq, flock). Use only when you intentionally accept reduced safety checks. |
-| `--always-checks` | Force strict mode (default). |
+| `--skip-checks` | Compatibility mode; fails with exit code `15` when required `jq`/`flock` capability is unavailable for the requested command. |
+| `--always-checks` | Force strict mode (default); takes precedence when both strict/skip flags are passed. |
 | `--dry-run` | Show planned actions without executing. |
 | `-v`, `--verbose` | Enable verbose output. |
 | `-vv` | Enable extra verbose output. |

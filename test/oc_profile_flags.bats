@@ -31,6 +31,18 @@ make_fake_jq_proxy() {
   echo "${path}"
 }
 
+run_with_minimal_path() {
+  local path_value="$1"
+  shift
+  run env PATH="${path_value}" "$@"
+}
+
+empty_bin_path() {
+  local dir="${BATS_TEST_TMPDIR}/empty-bin"
+  mkdir -p "${dir}"
+  echo "${dir}"
+}
+
 # ──────────────────────────────────────────────────────────────
 # --skip-checks flag
 # ──────────────────────────────────────────────────────────────
@@ -80,6 +92,19 @@ make_fake_jq_proxy() {
   assert_output --partial "Install"
 }
 
+@test "--always-checks enforces strict mode even when env enables skip-checks" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7")"
+  export OC_PROFILE_JQ="${fake}"
+  export OC_PROFILE_SKIP_CHECKS=true
+
+  run "$OC_PROFILE" --always-checks make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "jq >= 1.8 is required"
+  refute_output --partial "WARNING: --skip-checks is active"
+}
+
 @test "strict mode accepts jq 1.8" {
   local fake
   fake="$(make_fake_jq_proxy "1.8")"
@@ -89,7 +114,7 @@ make_fake_jq_proxy() {
   assert_success
 }
 
-@test "--skip-checks bypasses jq version floor" {
+@test "--skip-checks bypasses jq version floor when required capabilities are available" {
   local fake
   fake="$(make_fake_jq_proxy "1.7")"
   export OC_PROFILE_JQ="${fake}"
@@ -97,6 +122,133 @@ make_fake_jq_proxy() {
   run "$OC_PROFILE" --skip-checks make work --current
   assert_success
   assert_output --partial "WARNING: --skip-checks is active"
+}
+
+@test "both flags use strict mode even when --skip-checks appears first" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" --skip-checks --always-checks make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "jq >= 1.8 is required"
+}
+
+@test "both flags use strict mode even when --skip-checks appears last" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" --always-checks --skip-checks make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "jq >= 1.8 is required"
+}
+
+@test "skip mode missing jq fails with exit 15 on list" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks list
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'list' requires jq in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode missing flock fails with exit 15 on make" {
+  local real_jq
+  real_jq="$(command -v jq)"
+  export OC_PROFILE_JQ="${real_jq}"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks make work --current
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'make' requires flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode missing jq and flock fails with combined exit 15 message" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks make work --current
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'make' requires jq and flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode alias ls enforces canonical list jq capability message" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks ls
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'list' requires jq in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode alias rm enforces canonical delete combined capability message" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks rm work
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'delete' requires jq and flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode init enforces combined jq and flock capability message" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks init
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'init' requires jq and flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode delete command enforces canonical combined capability message" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks delete work
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'delete' requires jq and flock in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "skip mode list --skip-checks tail placement enforces jq capability gate under minimal PATH" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" list --skip-checks
+  assert_failure
+  assert [ "$status" -eq 15 ]
+  assert_output --partial "operation 'list' requires jq in --skip-checks mode; rerun without --skip-checks (or pass --always-checks)."
+}
+
+@test "list details alias parity holds between ls -a and list -a" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+
+  run "$OC_PROFILE" ls -a
+  assert_success
+  local out_ls="$output"
+
+  run "$OC_PROFILE" list -a
+  assert_success
+  local out_list="$output"
+
+  assert [ "$out_ls" = "$out_list" ]
+  assert_output --partial "hash="
+  assert_output --partial "providers="
+}
+
+@test "help alias topics route to canonical command usage" {
+  run "$OC_PROFILE" help ls
+  assert_success
+  assert_output --partial "usage: oc-profile list [--details|--detail|-a]"
+
+  run "$OC_PROFILE" help rm
+  assert_success
+  assert_output --partial "usage: oc-profile delete <name>"
+
+  run "$OC_PROFILE" help mv
+  assert_success
+  assert_output --partial "usage: oc-profile rename <old> <new>"
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -239,6 +391,41 @@ make_fake_jq_proxy() {
   assert_output "0.1.0-rc.1"
 }
 
+@test "--skip-checks --version remains exempt when jq and flock are unavailable" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks --version
+  assert_success
+  assert_output "0.1.0-rc.1"
+}
+
+@test "minimal-PATH version precedence works when --skip-checks appears first" {
+  local expected_version
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run "$OC_PROFILE" --version
+  assert_success
+  expected_version="$output"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks --always-checks --version
+  assert_success
+  assert_output "$expected_version"
+  refute_output --partial "WARNING: --skip-checks is active"
+}
+
+@test "minimal-PATH version precedence works when --always-checks appears first" {
+  local expected_version
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+
+  run "$OC_PROFILE" --version
+  assert_success
+  expected_version="$output"
+
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --always-checks --skip-checks --version
+  assert_success
+  assert_output "$expected_version"
+  refute_output --partial "WARNING: --skip-checks is active"
+}
+
 @test "--dry-run --version shows version without dry-run message" {
   run "$OC_PROFILE" --dry-run --version
   assert_success
@@ -250,6 +437,13 @@ make_fake_jq_proxy() {
   run "$OC_PROFILE" --skip-checks help
   assert_success
   assert_output --partial "OPTIONS"
+}
+
+@test "--skip-checks help remains exempt when jq and flock are unavailable" {
+  export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
+  run_with_minimal_path "$(empty_bin_path)" /usr/bin/bash "$OC_PROFILE" --skip-checks help
+  assert_success
+  assert_output --partial "USAGE"
 }
 
 @test "help includes init command" {

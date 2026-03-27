@@ -17,16 +17,24 @@ readonly USAGE_SAVE="usage: oc-profile save <name> [--set-active]"
 readonly USAGE_SWITCH="usage: oc-profile switch <name> [--save-current|--no-save-current] [--trust-mismatch|--abort-on-mismatch] [--allow-empty-target]"
 readonly USAGE_LIST="usage: oc-profile list [--details|--detail|-a]"
 
-# Shared local-flag ownership map (parser + help)
-readonly -a LOCAL_FLAGS_MAKE=(--current)
-readonly -a LOCAL_FLAGS_SAVE=(--set-active)
-readonly -a LOCAL_FLAGS_SWITCH=(--save-current --no-save-current --trust-mismatch --abort-on-mismatch --allow-empty-target)
-readonly -a LOCAL_FLAGS_LIST=(--details --detail -a)
-
-# Skip-checks capability registries (template-style provider pattern)
-readonly -a COMMANDS_CAPABILITY_EXEMPT=(help version)
-readonly -a COMMANDS_REQUIRE_JQ_IN_SKIP_MODE=(init migrate make save switch list which delete rename)
-readonly -a COMMANDS_REQUIRE_FLOCK_IN_SKIP_MODE=(init migrate make save switch delete rename)
+# Canonical command registry
+# Field order:
+# 1 canonical | 2 aliases_csv | 3 local_flags_csv | 4 help_aliases_csv
+# 5 requires_jq_skip | 6 requires_flock_skip | 7 capability_exempt | 8 mutating
+# 9 help_fn | 10 dispatch_fn | 11 help_summary
+readonly -a COMMAND_REGISTRY=(
+  "init||||yes|yes|no|yes|help_init|cmd_init|init                             Initialize fresh layout for first-time setup"
+  "migrate||||yes|yes|no|yes|help_migrate|cmd_migrate|migrate                          Migrate legacy installs to the current layout"
+  "make||--current||yes|yes|no|yes|help_make|cmd_make|make <name> [--current]          Save current auth as a profile, or create a placeholder"
+  "save||--set-active||yes|yes|no|yes|help_save|cmd_save|save <name> [--set-active]       Update an existing saved profile from current live auth"
+  "switch||--save-current,--no-save-current,--trust-mismatch,--abort-on-mismatch,--allow-empty-target||yes|yes|no|yes|help_switch|cmd_switch|switch <name>                    Switch live auth to a saved profile (restart opencode)"
+  "list|ls|--details,--detail,-a|ls|yes|no|no|no|help_list|cmd_list|list/ls                          List all profiles"
+  "which||||yes|no|no|no|help_which|cmd_which|which                            Show the active profile name"
+  "rename|mv||mv|yes|yes|no|yes|help_rename|cmd_rename|rename/mv <old> <new>            Rename a profile"
+  "delete|rm||rm|yes|yes|no|yes|help_delete|cmd_delete|delete/rm <name>                 Delete a profile (not the last or active one)"
+  "version|--version||--version|no|no|yes|no|help_version|cmd_version|version/--version                Print version"
+  "help|--help,-h||help,--help,-h|no|no|yes|no||cmd_help|help/--help/-h                   Show this help"
+)
 
 # ── Exit codes ─────────────────────────────────────────────
 # Deterministic exit codes; all mutating paths use these.
@@ -566,38 +574,51 @@ cmd_version() {
 
 normalize_help_topic() {
   local topic="${1:-}"
-  case "${topic}" in
-    ls) echo "list" ;;
-    rm) echo "delete" ;;
-    mv) echo "rename" ;;
-    -h|--help|help|"") echo "help" ;;
-    *) echo "${topic}" ;;
-  esac
+  [[ -n "${topic}" ]] || topic="help"
+
+  local canonical aliases_csv _local_flags_csv help_aliases_csv
+  local _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary
+  for row in "${COMMAND_REGISTRY[@]}"; do
+    IFS='|' read -r canonical aliases_csv _local_flags_csv help_aliases_csv \
+      _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary <<< "${row}"
+    if [[ "${topic}" == "${canonical}" ]]; then
+      echo "${canonical}"
+      return 0
+    fi
+    csv_contains "${topic}" "${help_aliases_csv}" && {
+      echo "${canonical}"
+      return 0
+    }
+  done
+
+  echo "${topic}"
 }
 
 normalize_command_token() {
   local token="${1:-}"
-  case "${token}" in
-    ls) echo "list" ;;
-    rm) echo "delete" ;;
-    mv) echo "rename" ;;
-    --help|-h) echo "help" ;;
-    --version) echo "version" ;;
-    *) echo "${token}" ;;
-  esac
+
+  local canonical aliases_csv
+  local _local_flags_csv _help_aliases_csv _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary
+  for row in "${COMMAND_REGISTRY[@]}"; do
+    IFS='|' read -r canonical aliases_csv _local_flags_csv _help_aliases_csv \
+      _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary <<< "${row}"
+    if [[ "${token}" == "${canonical}" ]]; then
+      echo "${canonical}"
+      return 0
+    fi
+    csv_contains "${token}" "${aliases_csv}" && {
+      echo "${canonical}"
+      return 0
+    }
+  done
+
+  echo "${token}"
 }
 
 is_command_token() {
   local token
   token="$(normalize_command_token "${1:-}")"
-  case "${token}" in
-    init|migrate|make|save|switch|list|which|delete|rename|version|help)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  command_registry_has "${token}"
 }
 
 flag_in_set() {
@@ -606,6 +627,67 @@ flag_in_set() {
   local candidate
   for candidate in "$@"; do
     if [[ "${needle}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+csv_contains() {
+  local needle="${1:-}"
+  local csv="${2:-}"
+  [[ -n "${csv}" ]] || return 1
+
+  local IFS=','
+  local candidate
+  read -r -a csv_items <<< "${csv}"
+  for candidate in "${csv_items[@]}"; do
+    if [[ "${needle}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+command_registry_has() {
+  local cmd="${1:-}"
+
+  local canonical
+  local _aliases_csv _local_flags_csv _help_aliases_csv _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary
+  for row in "${COMMAND_REGISTRY[@]}"; do
+    IFS='|' read -r canonical _aliases_csv _local_flags_csv _help_aliases_csv \
+      _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn _help_summary <<< "${row}"
+    if [[ "${cmd}" == "${canonical}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+command_registry_field_by_index() {
+  local cmd="${1:-}"
+  local idx="${2:-}"
+
+  local canonical aliases_csv local_flags_csv help_aliases_csv
+  local requires_jq requires_flock capability_exempt mutating help_fn dispatch_fn help_summary
+  for row in "${COMMAND_REGISTRY[@]}"; do
+    IFS='|' read -r canonical aliases_csv local_flags_csv help_aliases_csv \
+      requires_jq requires_flock capability_exempt mutating help_fn dispatch_fn help_summary <<< "${row}"
+    if [[ "${cmd}" == "${canonical}" ]]; then
+      case "${idx}" in
+        1) echo "${canonical}" ;;
+        2) echo "${aliases_csv}" ;;
+        3) echo "${local_flags_csv}" ;;
+        4) echo "${help_aliases_csv}" ;;
+        5) echo "${requires_jq}" ;;
+        6) echo "${requires_flock}" ;;
+        7) echo "${capability_exempt}" ;;
+        8) echo "${mutating}" ;;
+        9) echo "${help_fn}" ;;
+        10) echo "${dispatch_fn}" ;;
+        11) echo "${help_summary}" ;;
+        *) return 1 ;;
+      esac
       return 0
     fi
   done
@@ -625,6 +707,15 @@ join_flags_csv() {
   done
 }
 
+join_flags_csv_string() {
+  local csv="${1:-}"
+  [[ -n "${csv}" ]] || return 0
+
+  local IFS=','
+  read -r -a csv_items <<< "${csv}"
+  join_flags_csv "${csv_items[@]}"
+}
+
 has_usable_jq() {
   local jq_bin=""
   if [[ -n "${OC_PROFILE_JQ:-}" && -x "${OC_PROFILE_JQ}" ]]; then
@@ -642,17 +733,44 @@ has_flock_binary() {
 
 command_is_capability_exempt() {
   local cmd="${1:-}"
-  flag_in_set "${cmd}" "${COMMANDS_CAPABILITY_EXEMPT[@]}"
+  [[ "$(command_registry_field_by_index "${cmd}" 7 2>/dev/null || true)" == "yes" ]]
 }
 
 command_requires_jq_in_skip_mode() {
   local cmd="${1:-}"
-  flag_in_set "${cmd}" "${COMMANDS_REQUIRE_JQ_IN_SKIP_MODE[@]}"
+  [[ "$(command_registry_field_by_index "${cmd}" 5 2>/dev/null || true)" == "yes" ]]
 }
 
 command_requires_flock_in_skip_mode() {
   local cmd="${1:-}"
-  flag_in_set "${cmd}" "${COMMANDS_REQUIRE_FLOCK_IN_SKIP_MODE[@]}"
+  [[ "$(command_registry_field_by_index "${cmd}" 6 2>/dev/null || true)" == "yes" ]]
+}
+
+command_local_flags_csv() {
+  local cmd="${1:-}"
+  command_registry_field_by_index "${cmd}" 3
+}
+
+command_dispatch_fn() {
+  local cmd="${1:-}"
+  command_registry_field_by_index "${cmd}" 10
+}
+
+command_help_fn() {
+  local topic="${1:-}"
+  local canonical
+  canonical="$(normalize_help_topic "${topic}")"
+  command_registry_field_by_index "${canonical}" 9 2>/dev/null || true
+}
+
+render_command_help_summaries() {
+  local canonical
+  local _aliases_csv _local_flags_csv _help_aliases_csv _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn help_summary
+  for row in "${COMMAND_REGISTRY[@]}"; do
+    IFS='|' read -r canonical _aliases_csv _local_flags_csv _help_aliases_csv \
+      _requires_jq _requires_flock _capability_exempt _mutating _help_fn _dispatch_fn help_summary <<< "${row}"
+    echo "  ${help_summary}"
+  done
 }
 
 require_skip_mode_capabilities_for_command() {
@@ -689,23 +807,9 @@ require_skip_mode_capabilities_for_command() {
 flag_is_local_for_command() {
   local cmd="${1:-}"
   local flag="${2:-}"
-  case "${cmd}" in
-    make)
-      flag_in_set "${flag}" "${LOCAL_FLAGS_MAKE[@]}"
-      ;;
-    save)
-      flag_in_set "${flag}" "${LOCAL_FLAGS_SAVE[@]}"
-      ;;
-    switch)
-      flag_in_set "${flag}" "${LOCAL_FLAGS_SWITCH[@]}"
-      ;;
-    list)
-      flag_in_set "${flag}" "${LOCAL_FLAGS_LIST[@]}"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  local local_flags_csv
+  local_flags_csv="$(command_local_flags_csv "${cmd}" 2>/dev/null || true)"
+  csv_contains "${flag}" "${local_flags_csv}"
 }
 
 help_init() {
@@ -723,36 +827,44 @@ help_migrate() {
 }
 
 help_make() {
+  local local_flags_csv
+  local_flags_csv="$(command_local_flags_csv "make")"
   echo "${USAGE_MAKE}"
   echo ""
   echo "create a saved profile."
-  echo "  $(join_flags_csv "${LOCAL_FLAGS_MAKE[@]}")  copy current live credentials into the named profile and set active."
+  echo "  $(join_flags_csv_string "${local_flags_csv}")  copy current live credentials into the named profile and set active."
   echo "            first saved profile must be created with this flag."
   echo "  (no flag) create empty placeholder profile (allowed only after first saved profile exists)."
 }
 
 help_save() {
+  local local_flags_csv
+  local_flags_csv="$(command_local_flags_csv "save")"
   echo "${USAGE_SAVE}"
   echo ""
   echo "update an existing saved profile from current live credentials."
-  echo "  $(join_flags_csv "${LOCAL_FLAGS_SAVE[@]}")  set <name> as active after saving."
+  echo "  $(join_flags_csv_string "${local_flags_csv}")  set <name> as active after saving."
 }
 
 help_switch() {
+  local local_flags_csv
+  local_flags_csv="$(command_local_flags_csv "switch")"
   echo "${USAGE_SWITCH}"
   echo ""
   echo "switch active credentials to a saved profile."
-  echo "  $(join_flags_csv "${LOCAL_FLAGS_SWITCH[@]}")"
+  echo "  $(join_flags_csv_string "${local_flags_csv}")"
   echo "    --save-current / --no-save-current      control dirty-active save prompt behavior"
   echo "    --trust-mismatch / --abort-on-mismatch  control hash-mismatch trust behavior"
   echo "  --allow-empty-target                    allow switching to '{}' placeholder profiles"
 }
 
 help_list() {
+  local local_flags_csv
+  local_flags_csv="$(command_local_flags_csv "list")"
   echo "${USAGE_LIST}"
   echo ""
   echo "list saved profiles and mark the active one."
-  echo "  $(join_flags_csv "${LOCAL_FLAGS_LIST[@]}")  show hash, mtime, and provider summary per profile"
+  echo "  $(join_flags_csv_string "${local_flags_csv}")  show hash, mtime, and provider summary per profile"
 }
 
 help_which() {
@@ -780,8 +892,8 @@ help_version() {
 }
 
 help_render_option_lines() {
-  echo "  --skip-checks                    Skip runtime dependency checks (jq, flock)"
-  echo "  --always-checks                  Force strict mode (default)"
+  echo "  --skip-checks                    Compatibility mode; exits 15 when required jq/flock capability is unavailable"
+  echo "  --always-checks                  Force strict mode (default; takes precedence over --skip-checks)"
   echo "  --dry-run                        Show planned actions without executing"
   echo "  -v, --verbose                    Enable verbose output"
   echo "  -vv                              Enable extra verbose output"
@@ -799,22 +911,18 @@ help_show_examples() {
 cmd_help() {
   local topic="${1:-}"
   if [[ -n "${topic}" ]]; then
-    topic="$(normalize_help_topic "${topic}")"
-    case "${topic}" in
-      help)
-        ;;
-      init) help_init; return 0 ;;
-      migrate) help_migrate; return 0 ;;
-      make) help_make; return 0 ;;
-      save) help_save; return 0 ;;
-      switch) help_switch; return 0 ;;
-      list) help_list; return 0 ;;
-      which) help_which; return 0 ;;
-      rename) help_rename; return 0 ;;
-      delete) help_delete; return 0 ;;
-      version) help_version; return 0 ;;
-      *) die_with_code "${E_GENERIC}" "unknown help topic '${1}'. Run 'oc-profile help' for usage." ;;
-    esac
+    local normalized_topic
+    local help_fn
+    normalized_topic="$(normalize_help_topic "${topic}")"
+    command_registry_has "${normalized_topic}" \
+      || die_with_code "${E_GENERIC}" "unknown help topic '${1}'. Run 'oc-profile help' for usage."
+
+    if [[ "${normalized_topic}" != "help" ]]; then
+      help_fn="$(command_help_fn "${normalized_topic}")"
+      [[ -n "${help_fn}" ]] || die_with_code "${E_GENERIC}" "no help handler registered for '${normalized_topic}'."
+      "${help_fn}"
+      return 0
+    fi
   fi
 
   echo ""
@@ -825,17 +933,7 @@ cmd_help() {
   echo "  oc-profile help [command]"
   echo ""
   echo -e "${BOLD}COMMANDS${RESET}"
-  echo "  init                             Initialize fresh layout for first-time setup"
-  echo "  migrate                          Migrate legacy installs to the current layout"
-  echo "  make <name> [--current]          Save current auth as a profile, or create a placeholder"
-  echo "  save <name> [--set-active]       Update an existing saved profile from current live auth"
-  echo "  switch <name>                    Switch live auth to a saved profile (restart opencode)"
-  echo "  list|ls                          List all profiles"
-  echo "  which                            Show the active profile name"
-  echo "  rename|mv <old> <new>            Rename a profile"
-  echo "  delete|rm <name>                 Delete a profile (not the last or active one)"
-  echo "  version|--version                Print version"
-  echo "  help|--help|-h                   Show this help"
+  render_command_help_summaries
   echo ""
   echo -e "${BOLD}OPTIONS${RESET}"
   help_render_option_lines
@@ -1471,9 +1569,8 @@ cmd_rename() {
 DRY_RUN=false
 VERBOSE=0
 
-# Shared ownership map for parser + command help.
+# Parser/help/dispatch capability data is provided by COMMAND_REGISTRY.
 # Global: --skip-checks --always-checks --dry-run -v/--verbose --help/-h --version
-# Local patterns/help strings are defined in LOCAL_FLAGS_* constants near the top.
 
 expanded_args=()
 for arg in "$@"; do
@@ -1562,7 +1659,7 @@ if [[ -z "${cmd}" ]]; then
     exit 0
   fi
   if [[ "${want_global_help}" == "yes" || ${#parsed_args[@]} -eq 0 ]]; then
-    cmd_help
+    cmd_help ""
     exit 0
   fi
   cmd="help"
@@ -1576,17 +1673,6 @@ if [[ "${SKIP_CHECKS}" == "true" ]]; then
   warn "WARNING: --skip-checks is active. Runtime dependency checks (jq, flock) are bypassed."
 fi
 
-case "${cmd}" in
-  init)              cmd_init "$@" ;;
-  migrate)           cmd_migrate "$@" ;;
-  make)              cmd_make "$@" ;;
-  save)              cmd_save "$@" ;;
-  switch)            cmd_switch "$@" ;;
-  list|ls)           cmd_list "$@" ;;
-  which)             cmd_which "$@" ;;
-  delete|rm)         cmd_delete "$@" ;;
-  rename|mv)         cmd_rename "$@" ;;
-  version|--version) cmd_version ;;
-  help|--help|-h)    cmd_help "$@" ;;
-  *) die "unknown command '${cmd}'. Run 'oc-profile help' for usage." ;;
-esac
+dispatch_fn="$(command_dispatch_fn "${canonical_cmd}" 2>/dev/null || true)"
+[[ -n "${dispatch_fn}" ]] || die "unknown command '${cmd}'. Run 'oc-profile help' for usage."
+"${dispatch_fn}" "$@"
