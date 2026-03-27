@@ -102,6 +102,49 @@ teardown() {
   assert_output --partial "switched to 'personal'"
 }
 
+@test "switch to empty target fails non-interactive without --allow-empty-target" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make empty
+
+  run "$OC_PROFILE" switch empty --no-save-current
+  assert_failure
+  assert [ "$status" -eq 11 ]
+  assert_output --partial "prompt required"
+  assert_output --partial "--allow-empty-target"
+}
+
+@test "switch to empty target succeeds with --allow-empty-target" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make empty
+
+  run "$OC_PROFILE" switch empty --allow-empty-target --no-save-current
+  assert_success
+  assert_output --partial "switched to 'empty'"
+}
+
+@test "empty-target safeguard wins precedence over hash mismatch" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make empty
+  jq '.profiles.empty.sha256 = "deadbeef"' "${STATE_FILE}" > "${STATE_FILE}.tmp"
+  mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+
+  run "$OC_PROFILE" switch empty --no-save-current
+  assert_failure
+  assert [ "$status" -eq 11 ]
+  assert_output --partial "--allow-empty-target"
+}
+
+@test "with allow-empty-target hash mismatch gate still applies" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make empty
+  create_saved_profile "empty" "tamper-empty"
+
+  run "$OC_PROFILE" switch empty --allow-empty-target --no-save-current
+  assert_failure
+  assert [ "$status" -eq 12 ]
+  assert_output --partial "hash mismatch refused"
+}
+
 # ──────────────────────────────────────────────────────────────
 # switch behavior details
 # ──────────────────────────────────────────────────────────────

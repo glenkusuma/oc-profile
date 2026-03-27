@@ -350,3 +350,95 @@ make_fake_jq_proxy() {
   assert_success
   assert_output --partial "Switching to"
 }
+
+@test "grouped short flags route global -v and list-local -a correctly" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+
+  run "$OC_PROFILE" -av list
+  assert_success
+  assert_output --partial "hash="
+  assert_output --partial "providers="
+}
+
+@test "grouped short flags -ah and -ha fail without command ownership" {
+  run "$OC_PROFILE" -ah
+  assert_failure
+  assert [ "$status" -eq 1 ]
+  assert_output --partial "unknown flag '-a'"
+
+  run "$OC_PROFILE" -ha
+  assert_failure
+  assert [ "$status" -eq 1 ]
+  assert_output --partial "unknown flag '-a'"
+}
+
+@test "list details aliases --details --detail -a are equivalent" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+
+  run "$OC_PROFILE" list --details
+  assert_success
+  local out_details="$output"
+
+  run "$OC_PROFILE" list --detail
+  assert_success
+  local out_detail="$output"
+
+  run "$OC_PROFILE" list -a
+  assert_success
+  local out_short="$output"
+
+  assert [ "$out_details" = "$out_detail" ]
+  assert [ "$out_details" = "$out_short" ]
+}
+
+@test "grouped short flags -va and -av are equivalent for list" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+
+  run "$OC_PROFILE" -av list
+  assert_success
+  local out_av="$output"
+
+  run "$OC_PROFILE" -va list
+  assert_success
+  local out_va="$output"
+
+  assert [ "$out_av" = "$out_va" ]
+}
+
+@test "command-local long flags are accepted before command token" {
+  "$OC_PROFILE" make base --current
+
+  run "$OC_PROFILE" --current make beforemake
+  assert_success
+  assert_output --partial "created profile 'beforemake'"
+
+  simulate_connect "test-token-save-before"
+  run "$OC_PROFILE" --set-active save base
+  assert_success
+  assert_output --partial "set as active"
+
+  "$OC_PROFILE" make empty
+  run "$OC_PROFILE" --allow-empty-target --no-save-current switch empty
+  assert_success
+  assert_output --partial "switched to 'empty'"
+
+  run "$OC_PROFILE" --details list
+  assert_success
+  assert_output --partial "hash="
+}
+
+@test "list details marks invalid JSON profile and avoids token leakage" {
+  "$OC_PROFILE" make work --current
+  simulate_connect "test-token-sensitive"
+  "$OC_PROFILE" save work
+  printf '%s\n' '{invalid-json' > "${PROFILES_DIR}/work.json"
+
+  run "$OC_PROFILE" list --details
+  assert_success
+  assert_output --partial "hash=<invalid>"
+  assert_output --partial "providers=<invalid-json>"
+  refute_output --partial "test-token-sensitive"
+}

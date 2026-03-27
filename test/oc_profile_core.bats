@@ -31,6 +31,12 @@ teardown() {
   assert_output --partial "usage: oc-profile make <name> [--current]"
 }
 
+@test "help command supports save topic" {
+  run "$OC_PROFILE" help save
+  assert_success
+  assert_output --partial "usage: oc-profile save <name> [--set-active]"
+}
+
 @test "help command rejects unknown topic with non-zero" {
   run "$OC_PROFILE" help unknown-topic
   assert_failure
@@ -66,10 +72,22 @@ teardown() {
   assert_output --partial "usage: oc-profile make <name> [--current]"
 }
 
+@test "save --help shows subcommand usage" {
+  run "$OC_PROFILE" save --help
+  assert_success
+  assert_output --partial "usage: oc-profile save <name> [--set-active]"
+}
+
 @test "switch --help shows subcommand usage" {
   run "$OC_PROFILE" switch --help
   assert_success
   assert_output --partial "usage: oc-profile switch <name>"
+}
+
+@test "switch usage includes allow-empty-target option" {
+  run "$OC_PROFILE" switch
+  assert_failure
+  assert_output --partial "--allow-empty-target"
 }
 
 @test "no arguments shows help" {
@@ -178,9 +196,56 @@ teardown() {
 # list / which
 # ──────────────────────────────────────────────────────────────
 
+@test "save updates existing profile from live credentials" {
+  "$OC_PROFILE" make work --current
+  simulate_connect "test-token-updated"
+
+  run "$OC_PROFILE" save work
+  assert_success
+  assert_output --partial "saved current live credentials to 'work'"
+
+  run jq -r '.openai.access' "${PROFILES_DIR}/work.json"
+  assert_success
+  assert_output "test-token-updated"
+
+  run "$OC_PROFILE" which
+  assert_success
+  assert_output "work"
+}
+
+@test "save --set-active updates active_profile name" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+  "$OC_PROFILE" switch work --save-current
+  simulate_connect "test-token-personal-new"
+
+  run "$OC_PROFILE" save personal --set-active
+  assert_success
+  assert_output --partial "set as active"
+
+  run "$OC_PROFILE" which
+  assert_success
+  assert_output "personal"
+}
+
+@test "save fails when profile does not exist" {
+  "$OC_PROFILE" make work --current
+  run "$OC_PROFILE" save missing
+  assert_failure
+  assert_output --partial "profile 'missing' does not exist"
+}
+
+@test "save fails when live credentials file is missing" {
+  "$OC_PROFILE" make work --current
+  rm -f "${ACTIVE_CREDENTIALS_FILE}"
+  run "$OC_PROFILE" save work
+  assert_failure
+  assert_output --partial "live credentials file not found"
+}
+
 @test "list marks active profile" {
   "$OC_PROFILE" make work --current
-  "$OC_PROFILE" make personal
+  "$OC_PROFILE" make personal --current
   "$OC_PROFILE" switch personal --save-current
   run "$OC_PROFILE" list
   assert_success
@@ -200,6 +265,19 @@ teardown() {
   run "$OC_PROFILE" which
   assert_failure
   assert_output --partial "no active profile found"
+}
+
+@test "which guidance is explicit when active name is empty and saved profiles exist" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+  "$OC_PROFILE" switch work --save-current
+  jq '.active_profile = ""' "${STATE_FILE}" > "${STATE_FILE}.tmp"
+  mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+
+  run "$OC_PROFILE" which
+  assert_failure
+  assert_output --partial "no active saved profile is set"
+  assert_output --partial "save <existing-profile>"
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -226,4 +304,16 @@ teardown() {
   run "$OC_PROFILE" ls
   assert_success
   assert_output --partial "work"
+}
+
+@test "list guidance is explicit when active name is empty and profiles exist" {
+  "$OC_PROFILE" make work --current
+  "$OC_PROFILE" make personal --current
+  jq '.active_profile = ""' "${STATE_FILE}" > "${STATE_FILE}.tmp"
+  mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+
+  run "$OC_PROFILE" list
+  assert_success
+  assert_output --partial "no active saved profile is selected"
+  assert_output --partial "save <existing-profile>"
 }
