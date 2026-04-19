@@ -19,6 +19,7 @@ jobs:
       - name: Install jq >= 1.8
         run: |
           curl -L https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64 -o /usr/local/bin/jq
+          echo "020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d  /usr/local/bin/jq" | sha256sum -c
           chmod +x /usr/local/bin/jq
           jq --version
 
