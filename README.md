@@ -35,7 +35,7 @@ brew install jq util-linux
 
 Failure behavior:
 
-- In strict mode (default), if `jq` is missing/unusable/older than `1.8`, commands that require it fail with deterministic exit code `13` and install guidance.
+- In strict mode (default), if `jq` is missing/unusable/older than `1.8`, commands that require it fail with deterministic exit code `13` and install guidance. Strict mode accepts upstream jq version strings with tag-derived suffixes (e.g. `jq-1.8.1-dirty`, `jq-1.8.1-23-gcff4e00`) as long as the numeric base version is `>= 1.8`.
 - If `flock` is unavailable, mutating commands (`init`, `make`, `switch`, `rename`, `delete`, `migrate`) fail fast because safe lock acquisition is not possible.
 - `--skip-checks` enables compatibility mode. Commands that require unavailable `jq`/`flock` capabilities fail deterministically with exit code `15`. In this mode, `jq` capability means a usable `jq` binary (the strict `>= 1.8` version floor is not enforced).
 - `--always-checks` always takes precedence over `--skip-checks` when both are present.

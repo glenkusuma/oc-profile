@@ -9,6 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 ### Changed
+- Strict mode jq version parser now accepts upstream tag-derived suffixes (`jq-1.8.1-dirty`, `jq-1.8.1-23-gcff4e00`) while still enforcing the `>= 1.8` numeric floor.
 
 
 ## [0.1.0-rc.1] - 2026-03-24
