@@ -271,7 +271,7 @@ require_jq() {
   fi
 
   local major minor
-  if [[ "${jq_version}" =~ ^jq-([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+  if [[ "${jq_version}" =~ ^jq-([0-9]+)\.([0-9]+)(\.[0-9]+)?(-[0-9]+-g[0-9a-fA-F]+)?(-dirty)?$ ]]; then
     major="${BASH_REMATCH[1]}"
     minor="${BASH_REMATCH[2]}"
   else

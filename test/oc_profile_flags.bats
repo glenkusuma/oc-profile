@@ -146,6 +146,56 @@ empty_bin_path() {
   assert_output --partial "jq >= 1.8 is required"
 }
 
+@test "strict mode accepts jq 1.8 dirty suffix" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.8.1-dirty")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_success
+}
+
+@test "strict mode accepts jq 1.8 git describe suffix" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.8.1-23-gcff4e00")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_success
+}
+
+@test "strict mode accepts jq 1.8 git describe dirty suffix" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.8.1-23-gcff4e00-dirty")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_success
+}
+
+@test "strict mode rejects jq 1.7 dirty suffix with exit code 13" {
+  local fake
+  fake="$(make_fake_jq_proxy "1.7.1-dirty")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "jq >= 1.8 is required"
+  assert_output --partial "found jq-1.7.1-dirty"
+}
+
+@test "strict mode rejects non-numeric jq git fallback as unrecognized" {
+  local fake
+  fake="$(make_fake_jq_proxy "master-4467af7-dirty")"
+  export OC_PROFILE_JQ="${fake}"
+
+  run "$OC_PROFILE" make work --current
+  assert_failure
+  assert [ "$status" -eq 13 ]
+  assert_output --partial "version output was unrecognized"
+}
+
 @test "skip mode missing jq fails with exit 15 on list" {
   export OC_PROFILE_JQ="/tmp/does-not-exist-jq"
 
